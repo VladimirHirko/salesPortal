@@ -1,0 +1,34 @@
+# Python / Django
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+*.log
+
+# Django runtime
+db.sqlite3
+media/
+static/
+staticfiles/
+
+# Virtualenv & env files
+venv/
+.env
+.env.*
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Node (если есть фронт)
+node_modules/
+npm-debug.log*
+yarn-error.log
