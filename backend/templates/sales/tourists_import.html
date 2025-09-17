@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Импорт туристов</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    .card { border:1px solid #e5e7eb; border-radius:12px; padding:16px; max-width:980px; }
+    .row { margin:12px 0; }
+    table { border-collapse: collapse; width:100%; margin-top:10px; }
+    th, td { border:1px solid #e5e7eb; padding:8px; font-size:14px; }
+    th { background:#f9fafb; text-align:left; }
+    .ok { color:#065f46; } .warn { color:#92400e; } .err { color:#991b1b; }
+    .messages { margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <h1>Импорт туристов (Excel/CSV)</h1>
+
+  <div class="messages">
+    {% if messages %}
+      {% for m in messages %}
+        <div class="{{ m.tags }}">{{ m }}</div>
+      {% endfor %}
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <form method="post" enctype="multipart/form-data">
+      {% csrf_token %}
+      <div class="row">
+        {{ form.file.label_tag }}<br>
+        {{ form.file }}
+        <div style="font-size:12px;color:#6b7280">{{ form.file.help_text }}</div>
+      </div>
+      <div class="row">
+        <label>{{ form.dry_run }} {{ form.dry_run.label }}</label>
+      </div>
+      <div class="row">
+        <button type="submit">Загрузить</button>
+      </div>
+    </form>
+  </div>
+
+  {% if report %}
+    <h2>Отчёт</h2>
+    <div class="card">
+      <p>Лист: <b>{{ report.sheet }}</b></p>
+      <p>Строк всего: {{ report.total_rows }}</p>
+      <p>Семей создано: {{ report.created_families }},
+         обновлено: {{ report.updated_families }},
+         туристов создано: {{ report.created_travelers }}</p>
+
+      <h3>Сопоставление колонок</h3>
+      <table>
+        <thead><tr><th>Поле</th><th>Колонка в файле</th></tr></thead>
+        <tbody>
+          {% for k,v in report.column_mapping.items %}
+            <tr><td>{{ k }}</td><td>{{ v }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      {% if report.issues and report.issues|length > 0 %}
+        <h3>Замечания</h3>
+        <table>
+          <thead><tr><th>#</th><th>Сообщение</th><th>Данные</th></tr></thead>
+          <tbody>
+            {% for it in report.issues %}
+              <tr>
+                <td>{{ it.rownum }}</td>
+                <td>{{ it.message }}</td>
+                <td><pre style="white-space:pre-wrap">{{ it.payload|default:"" }}</pre></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
+  {% endif %}
+</body>
+</html>

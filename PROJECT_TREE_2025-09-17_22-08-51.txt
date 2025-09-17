@@ -1,0 +1,40 @@
+├── backend
+│   ├── sales
+│   │   ├── importers
+│   │   │   ├── __init__.py
+│   │   │   └── tourists_excel.py
+│   │   ├── migrations
+│   │   │   ├── 0001_initial.py
+│   │   │   └── __init__.py
+│   │   ├── services
+│   │   │   └── costasolinfo.py
+│   │   ├── __init__.py
+│   │   ├── admin.py
+│   │   ├── apps.py
+│   │   ├── cache.py
+│   │   ├── forms.py
+│   │   ├── models.py
+│   │   ├── tests.py
+│   │   ├── urls.py
+│   │   ├── views_api.py
+│   │   └── views_pages.py
+│   ├── sales_portal
+│   │   ├── __init__.py
+│   │   ├── asgi.py
+│   │   ├── settings.py
+│   │   ├── urls.py
+│   │   └── wsgi.py
+│   ├── static
+│   ├── templates
+│   │   └── sales
+│   │       └── tourists_import.html
+│   ├── .env
+│   ├── manage.py
+│   └── sales_portal.sqlite3.bak
+├── tools
+│   └── snapshot_repo.py
+├── .env
+├── .gitignore
+├── CODE_SNAPSHOT_2025-09-17.md
+├── PROJECT_TREE_2025-09-17.txt
+└── README.md

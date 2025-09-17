@@ -23,38 +23,83 @@ CSI_API_BASE = os.getenv("CSI_API_BASE_PROD") if CSI_API_MODE == "prod" else os.
 CSI_HTTP_TIMEOUT = float(os.getenv("CSI_HTTP_TIMEOUT", "6"))
 CSI_CACHE_SECONDS = int(os.getenv("CSI_CACHE_SECONDS", "60"))
 
+CSI = {
+    "MODE": CSI_API_MODE,
+    "BASE": CSI_API_BASE,
+    "HTTP_TIMEOUT": CSI_HTTP_TIMEOUT,
+    "CACHE_SECONDS": CSI_CACHE_SECONDS,
+    "TOKEN": os.getenv("CSI_API_TOKEN", ""),
+}
+
+
 # Простой локальный кэш (на проде можно поменять на Redis)
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         "LOCATION": "salesportal-cache",
         "TIMEOUT": CSI_CACHE_SECONDS,
+        "KEY_FUNCTION": "sales.cache.make_key",  # <— вот это
     }
 }
 
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
-        "rest_framework.renderers.BrowsableAPIRenderer",  # удобно в деве
+        "rest_framework.renderers.BrowsableAPIRenderer",
     ],
     "DEFAULT_PARSER_CLASSES": [
         "rest_framework.parsers.JSONParser",
         "rest_framework.parsers.FormParser",
         "rest_framework.parsers.MultiPartParser",
     ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticatedOrReadOnly",
+    ],
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+        # позже добавим JWT, если понадобится
+    ],
 }
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {"class": "logging.StreamHandler"},
+    },
+    "loggers": {
+        "django": {"handlers": ["console"], "level": "INFO"},
+        "sales": {"handlers": ["console"], "level": "DEBUG"},  # наш app
+        "requests": {"handlers": ["console"], "level": "WARNING"},
+    },
+}
+
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-#zl=j@4t*mj1s^hy*o5nb@+jbg_od^=+bq25)jd%a)_jb6z@1y'
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "django-insecure-#zl=j@4t*mj1s^hy*o5nb@+jbg_od^=+bq25)jd%a)_jb6z@1y"
+)
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "1") == "1"
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(",") if not DEBUG else []
 
-ALLOWED_HOSTS = []
+# Безопасные куки и заголовки — зависят от DEBUG:
+if DEBUG:
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+    # Локально редирект на HTTPS не нужен
+    # SECURE_SSL_REDIRECT = False
+else:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    # Включим редирект на HTTPS на проде (раскомментируй при готовности):
+    # SECURE_SSL_REDIRECT = True
 
 
 # Application definition
@@ -82,7 +127,13 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True  # на локалке, позже сузим
+CORS_ALLOW_ALL_ORIGINS = True  # ок для dev
+CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+]
 
 ROOT_URLCONF = 'sales_portal.urls'
 
@@ -100,6 +151,9 @@ TEMPLATES = [
         },
     },
 ]
+
+# TEMPLATES
+TEMPLATES[0]["DIRS"] = [BASE_DIR / "templates"]  # был пустой список
 
 WSGI_APPLICATION = 'sales_portal.wsgi.application'
 
@@ -119,6 +173,9 @@ DATABASES = {
     #     "OPTIONS": {"timeout": 20},
     # }
 }
+
+DATA_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024  # 20 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024
 
 
 # Password validation
@@ -155,7 +212,13 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
+# Static / Media
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"           # пригодится на проде
+STATICFILES_DIRS = [BASE_DIR / "static"]         # если положишь кастомные стили/скрипты
+
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

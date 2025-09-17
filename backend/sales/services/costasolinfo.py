@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import requests
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote_plus
 from django.conf import settings
 from django.core.cache import cache
 from typing import Any, Dict, List, Optional
@@ -42,10 +42,18 @@ def _get(path: str, params: dict | None = None, cache_key: str | None = None):
 
 # ==== Конкретные «обёртки» под текущие эндпоинты CostaSolinfo ====
 
-def search_hotels(query: str, limit: int = 10):
-    # Пример из твоих тестов: /api/hotels/?search=mar
-    params = {"search": query, "limit": limit}
-    return _get("hotels/", params, cache_key=f"hotels::{query}::{limit}")
+def search_hotels(q: str, limit: int = 10):
+    safe_q = quote_plus(q or "")          # пробелы -> '+', прочее экранируется
+    cache_key = f"hotels:{safe_q}:{limit}"
+    data = cache.get(cache_key)
+    if data is not None:
+        return data
+
+    # ... твой вызов к API ...
+    data = client.search_hotels(q, limit=limit)
+
+    cache.set(cache_key, data, timeout=60)   # или settings.CSI["CACHE_SECONDS"]
+    return data
 
 def transfer_schedule(hotel_id: int, date: str, type_: str = "group"):
     # Из твоих проверок: /api/transfer-schedule/?hotel_id=1&date=YYYY-MM-DD&type=group
