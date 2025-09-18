@@ -50,7 +50,7 @@ def search_hotels(q: str, limit: int = 10):
         return data
 
     # ... твой вызов к API ...
-    data = client.search_hotels(q, limit=limit)
+    c = get_client()
 
     cache.set(cache_key, data, timeout=60)   # или settings.CSI["CACHE_SECONDS"]
     return data

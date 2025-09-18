@@ -1,5 +1,8 @@
 # sales/views_api.py
-
+from collections import defaultdict
+from datetime import date
+from django.db.models import Q
+from django.conf import settings
 from django.shortcuts import render
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET
@@ -12,10 +15,20 @@ from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.views import APIView
 from rest_framework import status
+from .models import FamilyBooking, Traveler
 import re, html
+import requests
 
+_TAG_RE = re.compile(r"<[^>]+>")
 
 def login_view(request): return JsonResponse({"ok": True})
+
+def _csi_url(path: str) -> str:
+    """Надёжно склеивает CSI_API_BASE и относительный путь."""
+    base = getattr(settings, "CSI_API_BASE", "http://127.0.0.1:8000").rstrip("/")
+    if base.endswith("/api"):
+        return f"{base}/{path.lstrip('/')}"           # base уже с /api
+    return f"{base}/api/{path.lstrip('/')}"           # добавим /api
 
 @csrf_exempt
 @api_view(["POST"])
@@ -41,14 +54,178 @@ def debug_csi_base(request):
     })
 
 @api_view(["GET"])
+@permission_classes([AllowAny])
+def health(request):
+    return Response({"status": "ok"})
+
+def _via_client(query: str, limit: int) -> list:
+    from .services import costasolinfo as csi
+    data = csi.search_hotels(query, limit=limit)
+    return data if isinstance(data, list) else (data.get("items") if isinstance(data, dict) else [])
+
+def _via_proxy(query: str, limit: int) -> list:
+    """
+    Пробуем REST-эндпоинты источника:
+    1) /api/hotels/?search=
+    2) /api/available-hotels/?search=
+    Возвращаем первый непустой результат.
+    """
+    for path in ("hotels/", "available-hotels/"):
+        r = requests.get(_csi_url(path), params={"search": query, "limit": limit}, timeout=6)
+        if r.ok:
+            data = r.json()
+            items = data if isinstance(data, list) else (data.get("items") if isinstance(data, dict) else [])
+            if items:
+                return items
+    return []
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
 def hotels(request):
-    q = request.query_params.get("q", "").strip()
+    """
+    /api/sales/hotels/?q=best benalmadena   или   ?search=best benalmadena
+    Возвращает {items:[...]}.
+    Алгоритм: полная строка → последнее слово → первое слово;
+    для каждой попытки: сначала через csi-клиент, затем прямой прокси.
+    """
+    q = (request.query_params.get("q") or request.query_params.get("search") or "").strip()
     if not q:
         return Response({"items": []})
-    data = csi.search_hotels(q, limit=int(request.query_params.get("limit", "10")))
-    return Response({"items": data} if isinstance(data, list) else (data or {"items": []}))
 
-_TAG_RE = re.compile(r"<[^>]+>")
+    try:
+        limit = int(request.query_params.get("limit", "10"))
+    except ValueError:
+        limit = 10
+
+    attempts = [q]
+    parts = [p for p in re.split(r"[\s,.;-]+", q) if p]
+    if len(parts) > 1:
+        attempts += [parts[-1], parts[0]]  # сначала «benalmadena», затем «best»
+
+    for query in attempts:
+        items = []
+        # 1) через клиент
+        try:
+            items = _via_client(query, limit)
+        except Exception:
+            items = []
+        # 2) фолбэк — прямые REST эндпоинты источника
+        if not items:
+            try:
+                items = _via_proxy(query, limit)
+            except Exception:
+                items = []
+
+        if items:
+            _enrich_hotels(items)       # ← ДОБАВЛЕНО: подмешиваем счётчик
+            return Response({"items": items})
+
+    return Response({"items": []})
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def tourists(request):
+    """
+    /api/sales/tourists/?hotel_name=RIU%20COSTA%20DEL%20SOL&search=ivan
+    Также понимает: ?hotel_id=... (пока не используем), ?q=...
+    Возвращает {items:[{ id, last_name, first_name, checkin, checkout, room?, party:[...] }]}
+    где party — все путешественники в одной «семейной брони».
+    """
+    # 1) входные параметры
+    hotel_name = (request.query_params.get("hotel_name")
+                  or request.query_params.get("hotel")
+                  or "").strip()
+    _ = request.query_params.get("hotel_id")  # зарезервировано на будущее (маппинг ID↔name)
+    q = (request.query_params.get("search")
+         or request.query_params.get("q")
+         or "").strip().lower()
+
+    # Без названия отеля вернём пусто — чтобы не грузить всю базу
+    if not hotel_name:
+        return Response({"items": []})
+
+    # 2) модели
+    from .models import FamilyBooking, Traveler
+
+    # 3) берём все семьи по отелю (icontains, чтобы «RIU COSTA…» совпадал)
+    fam_qs = FamilyBooking.objects.filter(hotel_name__icontains=hotel_name)
+
+    # 4) выбираем путешественников этих семей, с фильтром по ФИО (если задан)
+    trav_qs = Traveler.objects.filter(family__in=fam_qs)
+    if q:
+        trav_qs = trav_qs.filter(Q(last_name__icontains=q) | Q(first_name__icontains=q))
+
+    # 5) сгруппируем travelers по family_id
+    groups: dict[int, list] = defaultdict(list)
+    for t in trav_qs.order_by("last_name", "first_name"):
+        groups[t.family_id].append(t)
+
+    if not groups:
+        return Response({"items": []})
+
+    # Подтянем сами семьи, чтобы знать даты/номер и пр.
+    fam_map = {f.id: f for f in FamilyBooking.objects.filter(id__in=groups.keys())}
+
+    def is_child(birth_date):
+        if not birth_date:
+            return False
+        try:
+            today = date.today()
+            age = today.year - birth_date.year - (
+                (today.month, today.day) < (birth_date.month, birth_date.day)
+            )
+            return age < 12
+        except Exception:
+            return False
+
+    items = []
+    for fam_id, members in groups.items():
+        fam = fam_map.get(fam_id)
+        # «хедлайном» покажем первого по алфавиту
+        head = members[0]
+        party = [{
+            "id": m.id,
+            "full_name": f"{m.last_name} {m.first_name}".strip(),
+            "is_child": is_child(getattr(m, "birth_date", None)),
+        } for m in members]
+
+        items.append({
+            "id": fam_id,  # используем id семейной брони как id карточки
+            "last_name": head.last_name,
+            "first_name": head.first_name,
+            "checkin": getattr(fam, "arrival_date", None) and fam.arrival_date.isoformat(),
+            "checkout": getattr(fam, "departure_date", None) and fam.departure_date.isoformat(),
+            "room": getattr(fam, "room", None) or "",  # если поля room нет — просто пустая строка
+            "party": party,
+        })
+
+    # Можно отсортировать по дате заезда (свежие сверху)
+    items.sort(key=lambda x: (x["checkin"] or ""), reverse=True)
+
+    return Response({"items": items})
+
+def _tourists_count_by_hotel_name(name: str) -> int:
+    # считаем именно путешественников (distinct на случай задвоений)
+    fam_ids = list(
+        FamilyBooking.objects.filter(hotel_name__icontains=name)
+        .values_list("id", flat=True)
+    )
+    if not fam_ids:
+        return 0
+    return (
+        Traveler.objects.filter(family_id__in=fam_ids)
+        .distinct()
+        .count()
+    )
+
+def _enrich_hotels(items: list[dict]) -> list[dict]:
+    # безопасно добавляем поле tourists_count к каждому отелю
+    for it in items:
+        name = (it.get("name") or it.get("title") or "").strip()
+        it["tourists_count"] = _tourists_count_by_hotel_name(name) if name else 0
+    return items
+
 
 def _strip_html(s: str) -> str:
     if not s:
