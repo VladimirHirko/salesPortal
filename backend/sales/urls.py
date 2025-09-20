@@ -1,45 +1,42 @@
 # backend/sales/urls.py
 from django.urls import path
-from . import views_api as api
+from . import views_api as v
 from .views_pages import tourists_import_page  # HTML-страница импорта
 
 app_name = "sales"
 
 urlpatterns = [
-    # ── Тех/health ──────────────────────────────────────────────────────────────
-    # /api/sales/health/
-    path("health/", api.health, name="health"),
+    # Health
+    path("health/", v.health, name="health"),
 
-    # ── HTML-страницы (админские/служебные) ────────────────────────────────────
-    # /api/sales/import/tourists/
+    # HTML-страницы (служебные)
     path("import/tourists/", tourists_import_page, name="tourists_import_page"),
-    path("tourists/", api.tourists, name="tourists"),
-    
-    # ── Публичные API эндпоинты ────────────────────────────────────────────────
-    # /api/sales/login/
-    path("login/", api.login_view, name="login"),
 
-    # /api/sales/hotels/?q=...  (также принимает ?search=...)
-    path("hotels/", api.hotels, name="hotels"),
+    # Публичные API
+    path("login/", v.login_view, name="login"),
+    path("hotels/", v.hotels, name="hotels"),                      # ?q= / ?search=
+    path("tourists/", v.tourists, name="tourists"),                # ?hotel_name=&search=
+    path("families/<int:fam_id>/", v.family_detail, name="family_detail"),
+    path("excursions/", v.excursions, name="excursions"),
 
-    # /api/sales/excursions/?lang=ru&limit=...
-    path("excursions/", api.excursions, name="excursions"),
+    # Пикапы (нормализованный вариант)
+    path("pickups/v2/", v.SalesExcursionPickupsView.as_view(), name="pickups_v2"),
 
-    # Легаси пикапы: /api/sales/pickups/?excursion_id=&hotel_id=
-    path("pickups/", api.pickups, name="pickups"),
+    # (Опционально) Легаси — можно удалить, если не используется
+    path("pickups/", v.pickups, name="pickups"),
 
-    # Новый нормализованный вариант пикапов:
-    # /api/sales/sales/pickups/?excursion_id=&hotel_id=&date=YYYY-MM-DD
-    # (если хочешь избежать "sales/sales" в URL, можешь переименовать путь ниже,
-    # например, на "pickups/v2/".)
-    path("sales/pickups/", api.SalesExcursionPickupsView.as_view(), name="sales_excursion_pickups"),
+    # Калькуляция цены — ВАЖНО: новая вью
+    path("pricing/quote/", v.pricing_quote_view, name="pricing_quote"),
 
-    # Калькуляция цены: /api/sales/pricing/quote/?excursion_id=&adults=&children=&infants=
-    path("pricing/quote/", api.quote, name="pricing_quote"),
+    # Черновик создания брони
+    path("bookings/create/", v.create_booking, name="create_booking"),
 
-    # Черновик создания брони (эхо-заглушка): /api/sales/bookings/create/
-    path("bookings/create/", api.create_booking, name="create_booking"),
+    # Отладка
+    path("debug/csi-base/", v.debug_csi_base, name="debug_csi_base"),
+    path("debug/pricing-sig/", v.pricing_debug_signature, name="debug_pricing_sig"),
+    path("debug/hotel-region/", v.debug_hotel_region, name="debug_hotel_region"),
+    path("debug/excursion-prices/", v.debug_excursion_prices, name="debug_excursion_prices"),
+    path("debug/raw/hotel/", v.debug_raw_hotel, name="debug_raw_hotel"),
+    path("debug/raw/excursion/", v.debug_raw_excursion, name="debug_raw_excursion"),
 
-    # Отладка базовых настроек источника: /api/sales/debug/csi-base/
-    path("debug/csi-base/", api.debug_csi_base, name="debug_csi_base"),
 ]

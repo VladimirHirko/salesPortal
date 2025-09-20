@@ -1,15 +1,17 @@
 # sales/views_api.py
 from collections import defaultdict
 from datetime import date
+import datetime as dt
 from django.db.models import Q
 from django.conf import settings
-from django.shortcuts import render
+from django.shortcuts import render, get_object_or_404
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.dateparse import parse_date
+from sales.services.costasolinfo import NotFoundError
 from .services import costasolinfo as csi
-from .services.costasolinfo import get_client
+from .services.costasolinfo import get_client, pricing_quote
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
@@ -18,6 +20,116 @@ from rest_framework import status
 from .models import FamilyBooking, Traveler
 import re, html
 import requests
+import logging
+import inspect
+
+WEEKDAYS = ["mon","tue","wed","thu","fri","sat","sun"]
+
+def _normalize_name(s: str) -> str:
+    """Убираем лишнее и приводим к нижнему регистру для сравнения."""
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _resolve_hotel_id_by_name(hotel_name: str) -> int | None:
+    """
+    Ищет hotel_id в CSI по названию отеля.
+    Приоритет: точное совпадение → начинается с → первый результат.
+    """
+    if not hotel_name:
+        return None
+
+    try:
+        res = csi.search_hotels(hotel_name, limit=10)
+        items = res if isinstance(res, list) else (res.get("items") or [])
+        if not items:
+            return None
+
+        target = _normalize_name(hotel_name)
+        # 1) точное совпадение
+        for it in items:
+            name = _normalize_name(it.get("name") or it.get("title") or "")
+            if name == target:
+                return int(it.get("id"))
+
+        # 2) начинается с
+        for it in items:
+            name = _normalize_name(it.get("name") or it.get("title") or "")
+            if name.startswith(target) or target.startswith(name):
+                return int(it.get("id"))
+
+        # 3) первый адекватный
+        for it in items:
+            if it.get("id"):
+                return int(it["id"])
+    except Exception:
+        pass
+    return None
+
+def _weekday_slug(date_str: str) -> str | None:
+    # Делает парсер терпимым: обрезаем мусор, берём только YYYY-MM-DD
+    try:
+        s = (date_str or "").strip()[:10]
+        d = dt.date.fromisoformat(s)
+        return WEEKDAYS[d.weekday()]  # 0=mon ... 6=sun
+    except Exception:
+        return None
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def debug_hotel_region(request):
+    """Показывает, какой регион видит CSI для данного hotel_id."""
+    hotel_id_raw = request.GET.get("hotel_id")
+    try:
+        hotel_id = int(hotel_id_raw) if hotel_id_raw else None
+    except ValueError:
+        return JsonResponse({"detail": "hotel_id must be int"}, status=400)
+    if not hotel_id:
+        return JsonResponse({"detail": "hotel_id required"}, status=400)
+
+    # импортируем только внутри функции, чтобы не ломать загрузку модуля
+    try:
+        from .services.costasolinfo import _hotel_region as svc_hotel_region
+    except ImportError:
+        return JsonResponse({"detail": "helper _hotel_region is not defined in costasolinfo.py"}, status=500)
+
+    region = svc_hotel_region(hotel_id)
+    return JsonResponse({"hotel_id": hotel_id, "region": region}, json_dumps_params={"ensure_ascii": False})
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def debug_excursion_prices(request):
+    """Возвращает цены экскурсии по региону (adult/child/currency) для пары (excursion_id, region)."""
+    try:
+        excursion_id = int(request.GET.get("excursion_id"))
+    except (TypeError, ValueError):
+        return JsonResponse({"detail": "excursion_id required (int)"}, status=400)
+
+    region_id = request.GET.get("region_id")
+    region_slug = request.GET.get("region_slug")
+    region = None
+    if region_id or region_slug:
+        try:
+            region = {"id": int(region_id)} if region_id else {"id": None}
+        except ValueError:
+            return JsonResponse({"detail": "region_id must be int"}, status=400)
+        if region_slug:
+            region["slug"] = region_slug
+
+    try:
+        from .services.costasolinfo import _excursion_price_for_region as svc_ex_price_region
+    except ImportError:
+        return JsonResponse({"detail": "helper _excursion_price_for_region is not defined in costasolinfo.py"}, status=500)
+
+    prices = svc_ex_price_region(excursion_id, region)
+    return JsonResponse(
+        {"excursion_id": excursion_id, "region": region, "prices": prices},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+log = logging.getLogger(__name__)
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -128,53 +240,65 @@ def hotels(request):
 def tourists(request):
     """
     /api/sales/tourists/?hotel_name=RIU%20COSTA%20DEL%20SOL&search=ivan
-    Также понимает: ?hotel_id=... (пока не используем), ?q=...
-    Возвращает {items:[{ id, last_name, first_name, checkin, checkout, room?, party:[...] }]}
-    где party — все путешественники в одной «семейной брони».
+    Также понимает: ?hotel_id=... (зарезервировано), ?q=...
+    Возвращает {items:[{ id, last_name, first_name, checkin, checkout, room, party:[...] }]}
+    где party — все путешественники (Traveler) в рамках одной FamilyBooking.
     """
     # 1) входные параметры
     hotel_name = (request.query_params.get("hotel_name")
                   or request.query_params.get("hotel")
                   or "").strip()
-    _ = request.query_params.get("hotel_id")  # зарезервировано на будущее (маппинг ID↔name)
+    _ = request.query_params.get("hotel_id")  # пока не используем
     q = (request.query_params.get("search")
          or request.query_params.get("q")
-         or "").strip().lower()
+         or "").strip()
 
-    # Без названия отеля вернём пусто — чтобы не грузить всю базу
     if not hotel_name:
         return Response({"items": []})
 
     # 2) модели
     from .models import FamilyBooking, Traveler
 
-    # 3) берём все семьи по отелю (icontains, чтобы «RIU COSTA…» совпадал)
-    fam_qs = FamilyBooking.objects.filter(hotel_name__icontains=hotel_name)
+    # 3) все семейные брони по отелю (icontains — нечувствительно к регистру)
+    fam_ids = list(
+        FamilyBooking.objects
+        .filter(hotel_name__icontains=hotel_name)
+        .values_list("id", flat=True)
+    )
+    if not fam_ids:
+        return Response({"items": []})
 
-    # 4) выбираем путешественников этих семей, с фильтром по ФИО (если задан)
-    trav_qs = Traveler.objects.filter(family__in=fam_qs)
+    # 4) выбираем путешественников этих семей
+    trav_qs = Traveler.objects.filter(family_id__in=fam_ids)
     if q:
         trav_qs = trav_qs.filter(Q(last_name__icontains=q) | Q(first_name__icontains=q))
 
-    # 5) сгруппируем travelers по family_id
-    groups: dict[int, list] = defaultdict(list)
-    for t in trav_qs.order_by("last_name", "first_name"):
-        groups[t.family_id].append(t)
+    # Берём только нужные поля и убираем дубликаты на уровне БД
+    trav_rows = (
+        trav_qs
+        .values("id", "last_name", "first_name", "dob", "family_id")
+        .order_by("family_id", "last_name", "first_name", "id")
+        .distinct()
+    )
 
-    if not groups:
+    if not trav_rows:
         return Response({"items": []})
 
-    # Подтянем сами семьи, чтобы знать даты/номер и пр.
-    fam_map = {f.id: f for f in FamilyBooking.objects.filter(id__in=groups.keys())}
+    # 5) группируем по family_id
+    groups = defaultdict(list)
+    for r in trav_rows:
+        groups[r["family_id"]].append(r)
 
-    def is_child(birth_date):
-        if not birth_date:
+    fam_map = {
+        f.id: f for f in FamilyBooking.objects.filter(id__in=groups.keys())
+    }
+
+    def is_child(dob):
+        if not dob:
             return False
         try:
             today = date.today()
-            age = today.year - birth_date.year - (
-                (today.month, today.day) < (birth_date.month, birth_date.day)
-            )
+            age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
             return age < 12
         except Exception:
             return False
@@ -182,27 +306,25 @@ def tourists(request):
     items = []
     for fam_id, members in groups.items():
         fam = fam_map.get(fam_id)
-        # «хедлайном» покажем первого по алфавиту
-        head = members[0]
+        head = members[0]  # первый по алфавиту
         party = [{
-            "id": m.id,
-            "full_name": f"{m.last_name} {m.first_name}".strip(),
-            "is_child": is_child(getattr(m, "birth_date", None)),
+            "id": m["id"],
+            "full_name": f'{m["last_name"]} {m["first_name"]}'.strip(),
+            "is_child": is_child(m.get("dob")),
         } for m in members]
 
         items.append({
-            "id": fam_id,  # используем id семейной брони как id карточки
-            "last_name": head.last_name,
-            "first_name": head.first_name,
-            "checkin": getattr(fam, "arrival_date", None) and fam.arrival_date.isoformat(),
-            "checkout": getattr(fam, "departure_date", None) and fam.departure_date.isoformat(),
-            "room": getattr(fam, "room", None) or "",  # если поля room нет — просто пустая строка
+            "id": fam_id,  # id семейной брони — ключ карточки
+            "last_name": head["last_name"],
+            "first_name": head["first_name"],
+            "checkin": (fam.arrival_date.isoformat() if getattr(fam, "arrival_date", None) else None),
+            "checkout": (fam.departure_date.isoformat() if getattr(fam, "departure_date", None) else None),
+            "room": "",  # комнат в модели нет — оставляем пусто
             "party": party,
         })
 
-    # Можно отсортировать по дате заезда (свежие сверху)
+    # свежие заезды выше
     items.sort(key=lambda x: (x["checkin"] or ""), reverse=True)
-
     return Response({"items": items})
 
 def _tourists_count_by_hotel_name(name: str) -> int:
@@ -239,6 +361,44 @@ def _strip_html(s: str) -> str:
 
 WEEKDAY_NUM_TO_CODE = {0:"mon",1:"tue",2:"wed",3:"thu",4:"fri",5:"sat",6:"sun"}
 WEEKDAY_CODE_TO_NUM = {v:k for k,v in WEEKDAY_NUM_TO_CODE.items()}
+
+def _is_child(birth_date):
+    if not birth_date:
+        return False
+    today = date.today()
+    age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+    return age < 12
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def family_detail(request, fam_id: int):
+    """
+    GET /api/sales/families/<fam_id>/
+    Возвращает карточку семьи с hotel_id и списком путешественников.
+    """
+    from .models import FamilyBooking, Traveler
+
+    fam = get_object_or_404(FamilyBooking, pk=fam_id)
+
+    party = []
+    for t in Traveler.objects.filter(family=fam).order_by("last_name", "first_name"):
+        party.append({
+            "id": t.id,
+            "first_name": t.first_name,
+            "last_name": t.last_name,
+            "full_name": f"{t.last_name} {t.first_name}".strip(),
+            "is_child": _is_child(t.dob),
+        })
+
+    return Response({
+        "id": fam.id,
+        "hotel_id": fam.hotel_id,                     # важно для пикапов/квоты
+        "hotel_name": fam.hotel_name,
+        "checkin": fam.arrival_date.isoformat() if fam.arrival_date else None,
+        "checkout": fam.departure_date.isoformat() if fam.departure_date else None,
+        "room": "",                                   # если позже появится поле — подставим его
+        "party": party,
+    })
 
 def _normalize_excursions(raw, compact: bool = True, limit: int | None = None, offset: int = 0):
     """
@@ -324,26 +484,55 @@ def excursions(request):
 
 
 class SalesExcursionPickupsView(APIView):
-    """GET /api/sales/pickups/?excursion_id=&hotel_id=&date=YYYY-MM-DD
-    Returns: [{id, point, time, lat?, lng?, direction?}]"""
+    """GET /api/sales/pickups/v2/?excursion_id=&hotel_id=&hotel_name=&date=YYYY-MM-DD
+    Returns: {excursion_id, excursion_title, hotel_id, date, count, results:[{...}]}
+    """
+
+    permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
+        # 1) excursion_id обязателен и целый
         try:
             excursion_id = int(request.GET.get("excursion_id", ""))
-            hotel_id = int(request.GET.get("hotel_id", ""))
-        except ValueError:
-            return Response({
-                "detail": "excursion_id and hotel_id must be integers"
-            }, status=status.HTTP_400_BAD_REQUEST)
+        except (TypeError, ValueError):
+            return Response({"detail": "excursion_id must be integer"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # 2) date обязателен и в формате YYYY-MM-DD
         date_str = request.GET.get("date")
         if not date_str or not parse_date(date_str):
             return Response({"detail": "Invalid or missing 'date' (YYYY-MM-DD)"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # 3) hotel_id ИЛИ hotel_name (fallback)
+        hotel_name = (request.GET.get("hotel_name") or request.GET.get("hotel") or "").strip()
+        hotel_id = None
+        hotel_id_raw = request.GET.get("hotel_id")
+        try:
+            hotel_id = int(hotel_id_raw) if hotel_id_raw not in (None, "",) else None
+        except ValueError:
+            hotel_id = None
+
+        if not hotel_id and hotel_name:
+            hid = _resolve_hotel_id_by_name(hotel_name)
+            if hid:
+                hotel_id = hid
+
+        if not hotel_id:
+            # мягкий ответ, как и раньше: просто пустой список без ошибки
+            title = csi.excursion_title(excursion_id, lang=(request.GET.get("lang") or "ru")[:5])
+            return Response({
+                "excursion_id": excursion_id,
+                "excursion_title": title,
+                "hotel_id": None,
+                "date": date_str,
+                "count": 0,
+                "results": [],
+            })
+
+        # 4) тянем пикапы у клиента
         client = get_client()
         pickups = client.excursion_pickups(excursion_id=excursion_id, hotel_id=hotel_id, date=date_str)
 
-        # добавим название экскурсии (язык можно брать из заголовка/квери, по умолчанию ru)
+        # 5) добавим заголовок экскурсии
         lang = (request.GET.get("lang") or request.headers.get("Accept-Language") or "ru")[:5]
         title = csi.excursion_title(excursion_id, lang=lang)
 
@@ -355,6 +544,7 @@ class SalesExcursionPickupsView(APIView):
             "count": len(pickups),
             "results": pickups,
         })
+
 
 
 @api_view(["GET"])
@@ -399,8 +589,6 @@ def pickups(request):
     }, status=200)
 
 
-
-
 @api_view(["GET"])
 def quote(request):
     try:
@@ -409,10 +597,153 @@ def quote(request):
         children = int(request.query_params.get("children", "0"))
         infants = int(request.query_params.get("infants", "0"))
     except (KeyError, ValueError):
-        return Response({"error": "invalid params"}, status=400)
-    region = request.query_params.get("region")
-    company_id = request.query_params.get("company_id")
+        return Response({"detail": "invalid params"}, status=400)
+
     lang = request.query_params.get("lang", "ru")
-    data = csi.pricing_quote(ex_id, adults, children, infants, region,
-                             int(company_id) if company_id else None, lang)
-    return Response(data)
+    hotel_id_raw = request.query_params.get("hotel_id")
+    hotel_id = int(hotel_id_raw) if (hotel_id_raw and hotel_id_raw.isdigit()) else None
+    date = request.query_params.get("date")
+    hotel_name = request.query_params.get("hotel_name") or request.query_params.get("hotel")
+
+    if not hotel_id and hotel_name:
+        hid = _resolve_hotel_id_by_name(hotel_name)
+        if hid:
+            hotel_id = hid
+
+    if not hotel_id:
+        return Response({"detail": "hotel_id is required (could not resolve by hotel_name)"}, status=400)
+
+    try:
+        data = pricing_quote(
+            excursion_id=ex_id,
+            adults=adults,
+            children=children,
+            infants=infants,
+            lang=lang,
+            hotel_id=hotel_id,
+            date=date,
+        )
+        return Response(data)
+    except Exception as e:
+        logging.getLogger(__name__).exception("quote() failed")
+        return Response({"detail": str(e)}, status=500)
+
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def pricing_debug_signature(request):
+    try:
+        import sales.services.costasolinfo as mod
+        sig = str(inspect.signature(mod.pricing_quote))
+        path = getattr(mod, "__file__", "<unknown>")
+        return Response({"module_file": path, "signature": sig})
+    except Exception as e:
+        return Response({"detail": str(e)}, status=500)
+
+def _weekday_slug(date_str: str) -> str | None:
+    try:
+        d = dt.date.fromisoformat(date_str)
+        return WEEKDAYS[d.weekday()]
+    except Exception:
+        return None
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def pricing_quote_view(request):
+    try:
+        excursion_id = int(request.GET.get("excursion_id"))
+        adults = int(request.GET.get("adults", 0))
+        children = int(request.GET.get("children", 0))
+        infants = int(request.GET.get("infants", 0))
+        lang = request.GET.get("lang") or "ru"
+
+        hotel_id_raw = request.GET.get("hotel_id")
+        hotel_id = int(hotel_id_raw) if (hotel_id_raw and hotel_id_raw.isdigit()) else None
+        hotel_name = request.GET.get("hotel_name") or request.GET.get("hotel")  # ← НОВОЕ
+        date = request.GET.get("date")
+
+        if adults < 0 or children < 0 or infants < 0:
+            return Response({"detail": "Negative quantities not allowed"}, status=400)
+
+        # Если hotel_id отсутствует — пробуем найти его по названию
+        if not hotel_id and hotel_name:
+            hid = _resolve_hotel_id_by_name(hotel_name)
+            if hid:
+                hotel_id = hid
+
+        # Если до сих пор нет hotel_id — честно скажем об этом
+        if not hotel_id:
+            return Response({"detail": "hotel_id is required (could not resolve by hotel_name)"}, status=400)
+
+        # Проверка доступности даты по экскурсии (если дата передана)
+        if date:
+            wd = _weekday_slug(date)
+            if not wd:
+                return Response({"detail": "Bad date format, use YYYY-MM-DD"}, status=400)
+            try:
+                ex = csi.excursion_detail(excursion_id)
+            except Exception:
+                ex = {}
+            avail_raw = (ex.get("available_days") or ex.get("days") or [])
+            avail_norm = []
+            for x in avail_raw:
+                if isinstance(x, int):
+                    avail_norm.append(WEEKDAYS[x % 7])     # 0=mon..6=sun
+                else:
+                    avail_norm.append(str(x).strip().lower()[:3])
+            if avail_norm and wd not in avail_norm:
+                return Response({
+                    "detail": f"Date {date} is not available for this excursion",
+                    "available_days": avail_norm
+                }, status=400)
+
+        # ВАЖНО: передаём date/ hotel_id дальше
+        quote = pricing_quote(
+            excursion_id=excursion_id,
+            adults=adults,
+            children=children,
+            infants=infants,
+            lang=lang,
+            hotel_id=hotel_id,
+            date=date,
+        )
+        return Response(quote)
+
+    except NotFoundError as e:
+        # аккуратно: это нормальная «нет цены»
+        return Response({"detail": str(e)}, status=404)
+    except (TypeError, ValueError) as e:
+        return Response({"detail": str(e), "type": e.__class__.__name__}, status=400)
+    except Exception as e:
+        logging.getLogger(__name__).exception("pricing_quote_view failed")
+        return Response({"detail": str(e), "type": e.__class__.__name__}, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def debug_raw_hotel(request):
+    from .services.costasolinfo import _get
+    hotel_id = request.GET.get("hotel_id")
+    if not hotel_id:
+        return JsonResponse({"detail": "hotel_id required"}, status=400)
+    try:
+        hid = int(hotel_id)
+    except ValueError:
+        return JsonResponse({"detail": "hotel_id must be int"}, status=400)
+    data = _get(f"/hotels/{hid}/", allow_404=True)
+    return JsonResponse({"hotel_id": hid, "raw": data}, json_dumps_params={"ensure_ascii": False, "default": str})
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def debug_raw_excursion(request):
+    from .services.costasolinfo import _get
+    excursion_id = request.GET.get("excursion_id")
+    if not excursion_id:
+        return JsonResponse({"detail": "excursion_id required"}, status=400)
+    try:
+        exid = int(excursion_id)
+    except ValueError:
+        return JsonResponse({"detail": "excursion_id must be int"}, status=400)
+    data = _get(f"/excursions/{exid}/", allow_404=True)
+    return JsonResponse({"excursion_id": exid, "raw": data}, json_dumps_params={"ensure_ascii": False, "default": str})

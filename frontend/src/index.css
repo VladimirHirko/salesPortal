@@ -1,68 +1,190 @@
+/* === Base reset (минимум) === */
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+
+/* === Mobile-first comfy UI === */
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  --bg: #ffffff;
+  --fg: #111827;      /* основной текст */
+  --muted: #4b5563;   /* вторичный текст */
+  --brand: #2563eb;   /* акцент/кнопки */
+  --border: #d1d5db;
+  --focus: #0ea5e9;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
-}
-
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-tap-highlight-color: transparent;
+  line-height: 1.35;
+  font-size: 16px;
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+/* Контейнер с безопасными отступами (вырезы iOS) */
+.app-padding {
+  padding: max(16px, env(safe-area-inset-top))
+           max(16px, env(safe-area-inset-right))
+           max(16px, env(safe-area-inset-bottom))
+           max(16px, env(safe-area-inset-left));
 }
 
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
+/* Текст/ссылки (минимум) */
+a { color: inherit; text-decoration: none; }
+h1, h2, h3 { margin: 0 0 .5rem 0; }
+
+/* Формы */
+.input, select, .btn {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--fg);
+  font-size: 16px; /* чтобы iOS не зумил */
+}
+.input:focus, select:focus, .btn:focus {
+  outline: 3px solid color-mix(in srgb, var(--focus) 40%, transparent);
+  outline-offset: 2px;
+}
+
+/* Кнопки приложения */
+.btn {
+  border: none;
+  background: var(--brand);
+  color: #fff;
+  font-weight: 700;
   cursor: pointer;
-  transition: border-color 0.25s;
 }
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+.btn[disabled] { opacity: .6; cursor: default; }
+
+/* Карточки */
+.card {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: #fff;
 }
 
-@media (prefers-color-scheme: light) {
+/* React Day Picker — крупные, контрастные элементы */
+.rdp {
+  --rdp-accent-color: var(--brand);
+  --rdp-accent-background-color: color-mix(in srgb, var(--brand) 10%, white);
+  --rdp-background-color: #fff;
+  --rdp-cell-size: 44px;           /* большие ячейки для пальцев */
+  --rdp-caption-font-size: 16px;
+  --rdp-outline: 2px solid var(--focus);
+  --rdp-outline-selected: 2px solid var(--brand);
+}
+.rdp-caption_label { font-weight: 700; }
+.rdp-head_cell { color: var(--muted); font-weight: 600; }
+.rdp-button_reset { border-radius: 10px; }
+.rdp-day_selected:not([disabled]),
+.rdp-day_selected:focus-visible { background: var(--brand); color: #fff; }
+.rdp-day_disabled { color: #9ca3af !important; opacity: .6; }
+
+/* Dark mode — подстраиваем переменные */
+@media (prefers-color-scheme: dark) {
   :root {
-    color: #213547;
-    background-color: #ffffff;
+    --bg:#0b0f17; --fg:#e5e7eb; --muted:#9ca3af; --border:#1f2937; --brand:#60a5fa; --focus:#22d3ee;
   }
-  a:hover {
-    color: #747bff;
+  .card, .input, select, .btn { background:#0f141d; border-color:var(--border); }
+  .rdp { --rdp-background-color:#0f141d; }
+}
+
+/* Прилипшая CTA на мобильных */
+@media (max-width: 640px) {
+  .sticky-cta {
+    position: sticky;
+    bottom: max(8px, env(safe-area-inset-bottom));
+    z-index: 10;
   }
-  button {
-    background-color: #f9f9f9;
+}
+
+/* ---------- Общие улучшения (и для десктопа тоже) ---------- */
+
+/* Контент-колонка: на широком экране не растягиваем слишком сильно */
+.container {
+  max-width: 720px;         /* приятная ширина для чтения */
+  margin: 0 auto;
+}
+
+/* Заголовки немного крупнее и плотнее */
+h1 { font-size: clamp(20px, 2.2vw, 28px); font-weight: 800; }
+
+/* Карточки: немного больше внутреннего воздуха */
+.card { padding: 10px; }
+
+/* Элементы форм — одинаковая высота и межстрочный интервал получше */
+.input, select, .btn {
+  min-height: 48px;
+  line-height: 1.25;
+}
+
+/* Чекбоксы легче попасть пальцем */
+label > input[type="checkbox"] {
+  width: 20px; height: 20px;
+}
+
+/* ---------- Мобильная настройка (≤ 640px) ---------- */
+@media (max-width: 640px) {
+  html, body { font-size: 17px; }  /* чуть крупнее базовый размер */
+
+  .app-padding {
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-right: max(12px, env(safe-area-inset-right));
+    padding-bottom: max(12px, env(safe-area-inset-bottom) + 56px); /* место под CTA */
+    padding-left: max(12px, env(safe-area-inset-left));
   }
+
+  /* Увеличим вертикальные расстояния между блоками */
+  .stack-sm > * + * { margin-top: 8px; }
+  .stack-md > * + * { margin-top: 12px; }
+  .stack-lg > * + * { margin-top: 16px; }
+
+  /* Текстовые подсказки и вторичный текст контрастнее и крупнее */
+  .muted { color: var(--muted); font-size: 14px; }
+
+  /* Кнопка-CTA прилипает и растягивается на всю ширину */
+  .sticky-cta {
+    position: fixed;
+    left: 0; right: 0;
+    bottom: env(safe-area-inset-bottom);
+    width: 100%;
+    border-radius: 0;
+    padding: 16px;
+    font-size: 17px;
+  }
+
+  /* Поля формы крупнее: легче попасть */
+  .input, select, .btn {
+    min-height: 52px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    font-size: 17px;
+  }
+
+  /* Чекбоксы с большим кликабельным лейблом */
+  .person-row {
+    padding: 12px;
+    border-radius: 14px;
+    gap: 10px;
+  }
+  .person-row input[type="checkbox"] {
+    width: 22px; height: 22px;
+  }
+
+  /* DayPicker: крупные навкнопки и заголовок месяца */
+  .rdp {
+    --rdp-cell-size: 46px;
+    --rdp-caption-font-size: 18px;
+  }
+  .rdp-nav_button { width: 44px; height: 44px; }
+  .rdp-head_cell { padding: 10px 0; }
+}
+
+/* ---------- Очень маленькие экраны (≤ 380px) ---------- */
+@media (max-width: 380px) {
+  html, body { font-size: 16px; }
+  .input, select, .btn { font-size: 16px; min-height: 50px; }
+  .rdp { --rdp-cell-size: 44px; }
 }
