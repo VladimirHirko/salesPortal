@@ -4,6 +4,14 @@ from rest_framework.routers import DefaultRouter
 
 from . import views_api as v
 from .views_pages import tourists_import_page   # ← добавили
+from .views_api import (
+    CompanyViewSet,
+    FamilyBookingDraftsView,
+    BookingBatchPreviewView,
+    BookingBatchSendView,
+    BookingCreateView,
+    # … остальные вьюхи, которые уже были подключены
+)
 
 router = DefaultRouter()
 router.register(r"companies", v.CompanyViewSet, basename="company")

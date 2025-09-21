@@ -128,10 +128,14 @@ export default function FamilyScreen(){
   useEffect(() => {
     let aborted = false;
     (async () => {
-      const r = await fetch(`/api/sales/bookings/family/${famId}/drafts/`);
+      const r = await fetch(`/api/sales/bookings/family/${famId}/drafts/?_=${Date.now()}`, {
+        cache: 'no-store'
+      });
       if (!aborted && r.ok) {
         const json = await r.json();
         setDrafts(Array.isArray(json) ? json : (json.items || []));
+      } else if (!aborted) {
+        setDrafts([]); // чтобы секция корректно скрывалась при ошибке
       }
     })();
     return () => { aborted = true; };
@@ -218,22 +222,58 @@ export default function FamilyScreen(){
     }
   }, [excursions, excursionId])
 
-  // Сравниваем "та же" бронь?
-  function sameSet(a=[], b=[]){
+  // --- helpers: извлечь id участников из драфта/боди ---------------------------
+  function extractTravelerIdsFromDraft(d) {
+    if (!d) return [];
+    if (Array.isArray(d.travelers)) return d.travelers.map(Number);
+    if (typeof d.travelers_csv === 'string' && d.travelers_csv.trim()) {
+      return d.travelers_csv.split(',').map(x => Number(x.trim())).filter(n => Number.isFinite(n));
+    }
+    return [];
+  }
+  function sameSet(a=[], b=[]) {
     const A = new Set(a.map(Number)), B = new Set(b.map(Number));
     if (A.size !== B.size) return false;
     for (const v of A) if (!B.has(v)) return false;
     return true;
   }
 
-  function isSameBooking(b, body) {
-    const bTrav = (b.travelers || (b.travelers_csv ? b.travelers_csv.split(',').map(Number) : []));
-    return String(b.excursion_id) === String(body.excursion_id)
-      && String(b.date) === String(body.date)
-      && String(b.excursion_language||'') === String(body.excursion_language||'')
-      && Number(b.pickup_point_id||0) === Number(body.pickup_point_id||0)
-      && sameSet(bTrav, body.travelers || []);
+  function badge(text, kind) {
+    const cls = kind === 'booked' ? 'badge badge-success'
+             : kind === 'ready' ? 'badge badge-info'
+             : kind === 'cancelled' ? 'badge badge-muted'
+             : 'badge';
+    return <span className={cls} style={{ marginLeft: 8 }}>{text}</span>;
   }
+
+  // --- главный компаратор ------------------------------------------------------
+  function isSameBooking(draft, body) {
+    const keySame =
+      String(draft.excursion_id) === String(body.excursion_id) &&
+      String(draft.date) === String(body.date) &&
+      Number(draft.pickup_point_id || 0) === Number(body.pickup_point_id || 0);
+
+    if (!keySame) return false;
+
+    // сравнение состава: если есть оба списка — сравниваем по множествам
+    const dTrav = extractTravelerIdsFromDraft(draft);
+    const bTrav = Array.isArray(body.travelers) ? body.travelers.map(Number) : [];
+
+    if (dTrav.length && bTrav.length) {
+      return sameSet(dTrav, bTrav);
+    }
+
+    // иначе — сравниваем по количеству взрослых/детей/младенцев
+    const dA = Number(draft.adults || 0);
+    const dC = Number(draft.children || 0);
+    const dI = Number(draft.infants || 0);
+    const bA = Number(body.adults || 0);
+    const bC = Number(body.children || 0);
+    const bI = Number(body.infants || 0);
+
+    return dA === bA && dC === bC && dI === bI;
+  }
+
 
 
   const submitBooking = async ()=>{
@@ -309,6 +349,21 @@ export default function FamilyScreen(){
     }
   };
 
+  function namesByIds(ids=[], id2name={}) {
+    return ids.map(id => id2name[id]).filter(Boolean);
+  }
+
+  // карта id -> "Имя Фамилия" из fam.party
+  const id2name = useMemo(() => {
+    const map = {};
+    const party = Array.isArray(fam?.party) ? fam.party : [];   // ← безопасно
+    for (const p of party) {
+      map[p.id] = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ');
+    }
+    return map;
+  }, [fam]);
+
+
 
   if(!fam) return <div style={{padding:16}}>Загрузка…</div>
 
@@ -316,6 +371,7 @@ export default function FamilyScreen(){
 
   const adultsCount = (fam.party || []).filter(p=>!p.is_child && sel.includes(p.id)).length
   const childrenCount = (fam.party || []).filter(p=> p.is_child && sel.includes(p.id)).length
+
 
   return (
     <div className="app-padding container">
@@ -540,73 +596,104 @@ export default function FamilyScreen(){
         <div className="section" style={{marginTop:16}}>
           <div className="section__head">Черновики для этой семьи</div>
           <div className="section__body drafts">
-            {drafts.map((b) => (
-              <div key={b.id} className="draft">
-                <div className="draft__row">
-                  <div className="draft__title">
-                    {b.excursion_title || `Экскурсия #${b.excursion_id}`}
+            {drafts.map((b) => {
+              const travNames = Array.isArray(b.travelers_names) && b.travelers_names.length
+                ? b.travelers_names
+                : namesByIds(extractTravelerIdsFromDraft(b), id2name);
+
+              const label =
+                b.ui_state === 'booked' ? 'Забронировано'
+              : b.ui_state === 'ready' ? 'Готово к отправке'
+              : b.ui_state === 'cancelled' ? 'Отменено'
+              : '';
+
+              return (
+                <div key={b.id} className="draft">
+                  <div className="draft__row">
+                    <div className="draft__title">
+                      {b.excursion_title || `Экскурсия #${b.excursion_id}`}
+                      {label && badge(label, b.ui_state)}
+                    </div>
+                    <div className="draft__meta">{b.date || '—'}</div>
                   </div>
-                  <div className="draft__meta">{b.date || '—'}</div>
-                </div>
 
-                <div className="draft__meta" style={{marginTop:4}}>
-                  {b.pickup_point_name ? `Пикап: ${b.pickup_point_name}${b.pickup_time_str ? `, ${b.pickup_time_str}` : ''}` : 'Пикап: —'}
-                  {b.excursion_language ? ` · Язык: ${String(b.excursion_language).toUpperCase()}` : ''}
-                  {b.room_number ? ` · Комната: ${b.room_number}` : ''}
-                  {b.maps_url && <> · <a href={b.maps_url} target="_blank" rel="noreferrer">Карта</a></>}
-                </div>
+                  <div className="draft__meta" style={{marginTop:4}}>
+                    {b.pickup_point_name ? `Пикап: ${b.pickup_point_name}${b.pickup_time_str ? `, ${b.pickup_time_str}` : ''}` : 'Пикап: —'}
+                    {b.excursion_language ? ` · Язык: ${String(b.excursion_language).toUpperCase()}` : ''}
+                    {b.room_number ? ` · Комната: ${b.room_number}` : ''}
+                    {b.maps_url && <> · <a href={b.maps_url} target="_blank" rel="noreferrer">Карта</a></>}
+                  </div>
 
-                <div className="draft__sum">
-                  {fmtMoney(b.gross_total || 0, 'EUR')}
+                  {travNames.length > 0 && (
+                    <div className="draft__meta" style={{marginTop:4}}>
+                      Участники: {travNames.join(', ')}
+                    </div>
+                  )}
+
+                  <div className="draft__sum">
+                    {fmtMoney(b.gross_total || 0, 'EUR')}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
+
           </div>
           <div className="section__foot">
             <div className="muted" style={{marginRight:'auto'}}>
               Итого по черновикам: <b>{fmtMoney(draftsTotal, 'EUR')}</b>
             </div>
+            {/*Предпросмотр */}
             <button
               className="btn btn-secondary"
               onClick={async ()=>{
                 if (!drafts.length) return;
-                const ids = drafts.map(d=>d.id);
+                const draftIds = drafts.filter(d => d.is_sendable).map(d => d.id);
+                if (!draftIds.length) { alert('Нет черновиков, готовых к отправке.'); return; }
+
                 const r = await fetch('/api/sales/bookings/batch/preview/', {
                   method:'POST', headers:{'Content-Type':'application/json'},
-                  body: JSON.stringify({ booking_ids: ids })
+                  body: JSON.stringify({ booking_ids: draftIds })
                 });
                 const p = await r.json();
                 if (!r.ok) { alert('Ошибка предпросмотра: ' + (p?.detail || r.status)); return; }
-                alert(`К отправке ${ids.length} строк. После подтверждения будет отправлено письмо.`);
+                alert(`К отправке ${draftIds.length} строк. После подтверждения будет отправлено письмо.`);
               }}
             >
               Предпросмотр
             </button>
 
+            {/* Отправка */}
             <button
               className="btn btn-primary"
               onClick={async ()=>{
-                if (!drafts.length) return;
+                const draftIds = drafts.filter(d => d.is_sendable).map(d => d.id);
+                if (!draftIds.length) { alert('Нет черновиков для отправки.'); return; }
 
                 const email = (companies.find(c=>c.id===companyId)?.email_for_orders || '').trim();
                 if (!email) { alert('У выбранной компании нет email для заявок.'); return; }
 
-                const ids = drafts.map(d=>d.id);
-                const ok = confirm(`Отправить ${ids.length} броней на ${email}?`);
+                const ok = confirm(`Отправить ${draftIds.length} броней на ${email}?`);
                 if (!ok) return;
 
                 const r2 = await fetch('/api/sales/bookings/batch/send/', {
                   method:'POST', headers:{'Content-Type':'application/json'},
-                  body: JSON.stringify({ booking_ids: ids, email })
+                  body: JSON.stringify({ booking_ids: draftIds, email })
                 });
                 const s = await r2.json();
                 if (!r2.ok) { alert('Ошибка отправки: ' + (s?.detail || r2.status)); return; }
-                alert(`Отправлено. Пакет ${s.batch_code}, записей: ${s.count}`);
-                setDrafts([]);
+
+                alert(`Отправлено. Обновляю список...`);
+
+                // ← вместо setDrafts([]) перечитаем список
+                const r3 = await fetch(`/api/sales/bookings/family/${famId}/drafts/`);
+                const j3 = await r3.json().catch(()=>[]);
+                setDrafts(Array.isArray(j3) ? j3 : (j3.items || []));
               }}
             >
               Отправить бронь
             </button>
+
+
           </div>
         </div>
       )}

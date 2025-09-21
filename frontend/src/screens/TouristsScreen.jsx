@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 
-
 export default function TouristsScreen(){
   const { hotelId } = useParams()
   const [sp] = useSearchParams()
@@ -18,74 +17,78 @@ export default function TouristsScreen(){
       const qv = q.trim()
       setLoading(true)
       try{
-        const r = await fetch(`/api/sales/tourists/?hotel_id=${encodeURIComponent(hotelId)}&hotel_name=${encodeURIComponent(hotelName)}&search=${encodeURIComponent(qv)}`)
+        const url = `/api/sales/tourists/?hotel_id=${encodeURIComponent(hotelId)}&hotel_name=${encodeURIComponent(hotelName)}&search=${encodeURIComponent(qv)}`
+        const r = await fetch(url)
         const data = await r.json()
         const list = Array.isArray(data) ? data : (data?.items || [])
         if(!stop) setItems(list)
-      }catch(e){
+      }catch{
         if(!stop) setItems([])
       }finally{
         if(!stop) setLoading(false)
       }
     }, 250)
     return ()=>{ stop = true; clearTimeout(t) }
-  }, [hotelId, q])
+  }, [hotelId, hotelName, q])
 
   return (
-    <div style={{padding:16, fontFamily:'system-ui'}}>
-      <button
-        onClick={()=>nav(-1)}
-        style={{marginBottom:12, border:'1px solid #e5e7eb', borderRadius:10, padding:'6px 10px'}}
-      >
-        ← Назад
-      </button>
-
-      <h1 style={{fontSize:20, fontWeight:600, marginBottom:8}}>
-        Туристы {hotelName ? `— ${hotelName}` : ''}
-      </h1>
-
-      <input
-        value={q}
-        onChange={e=>setQ(e.target.value)}
-        placeholder="Поиск по фамилии"
-        style={{width:'100%', padding:'12px 14px', border:'1px solid #e5e7eb', borderRadius:12}}
-      />
-
-      <div style={{marginTop:12, fontSize:12, color:'#6b7280'}}>
-        {loading ? 'Загрузка…' : `Найдено: ${items.length}`}
+    <div className="app-padding container">
+      {/* Навигация */}
+      <div className="section" style={{marginBottom:12}}>
+        <div className="section__body" style={{display:'flex', gap:8}}>
+          <button onClick={()=>nav(-1)} className="btn btn-outline" style={{width:'auto'}}>← Назад</button>
+          <div style={{alignSelf:'center'}}>
+            <h1>{hotelName || 'Туристы'}</h1>
+          </div>
+        </div>
       </div>
 
-      <div style={{marginTop:12, display:'grid', gap:12}}>
-        {items.map(t => (
-          <button
-            key={t.id}
-            onClick={()=> nav(`/family/${t.id}`)}
-            style={{
-              width:'100%',
-              textAlign:'left',
-              display:'block',
-              border:'1px solid #e5e7eb',
-              borderRadius:16,
-              padding:12,
-              background:'white',
-              cursor:'pointer'
-            }}
-            aria-label={`Открыть семью ${t.last_name} ${t.first_name}`}
-          >
-            <div style={{fontWeight:600}}>
-              {t.last_name} {t.first_name}
-            </div>
-            <div style={{fontSize:12, color:'#6b7280'}}>
-              Заезд {t.checkin || '—'} — {t.checkout || '—'}
-            </div>
-            {Array.isArray(t.party) && t.party.length > 0 && (
-              <div style={{marginTop:6, fontSize:12, color:'#6b7280'}}>
-                {t.party.map(p => `• ${p.full_name}${p.is_child ? ' (ребёнок)' : ''}`).join('  ')}
-              </div>
-            )}
-          </button>
-        ))}
+      {/* Поиск */}
+      <div className="section">
+        <div className="section__head">Поиск по фамилии</div>
+        <div className="section__body stack-8">
+          <input
+            value={q}
+            onChange={e=>setQ(e.target.value)}
+            placeholder="Начните вводить фамилию"
+            className="input"
+            inputMode="search"
+          />
+          <div className="muted" role="status" aria-live="polite">
+            {loading ? 'Загрузка…' : `Найдено: ${items.length}`}
+          </div>
+        </div>
       </div>
+
+      {/* Список семей */}
+      {items.length > 0 && (
+        <div className="section" style={{marginTop:12}}>
+          <div className="section__head">Результаты</div>
+          <div className="section__body" style={{display:'grid', gap:10}}>
+            {items.map(t => (
+              <button
+                key={t.id}
+                onClick={()=> nav(`/family/${t.id}`)}
+                className="btn btn-ghost"
+                style={{display:'block', textAlign:'left', width:'100%'}}
+                aria-label={`Открыть семью ${t.last_name} ${t.first_name}`}
+              >
+                <div style={{fontWeight:700}}>
+                  {t.last_name} {t.first_name}
+                </div>
+                <div className="muted" style={{fontSize:12}}>
+                  Заезд {t.checkin || '—'} — {t.checkout || '—'}
+                </div>
+                {Array.isArray(t.party) && t.party.length > 0 && (
+                  <div className="muted" style={{marginTop:6, fontSize:12}}>
+                    {t.party.map(p => `• ${p.full_name}${p.is_child ? ' (ребёнок)' : ''}`).join('  ')}
+                  </div>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

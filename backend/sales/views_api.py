@@ -3,6 +3,7 @@ from collections import defaultdict
 from datetime import date
 import datetime as dt
 from django.db.models import Q
+from django.core.exceptions import FieldError   # ← ДОБАВИТЬ
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.shortcuts import render, get_object_or_404
@@ -11,6 +12,7 @@ from django.views.decorators.http import require_GET
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.dateparse import parse_date
 from django.utils.decorators import method_decorator
+from django.views.decorators.cache import never_cache
 from sales.services.costasolinfo import NotFoundError
 from .services import costasolinfo as csi
 from .services.costasolinfo import get_client, pricing_quote
@@ -415,24 +417,59 @@ def family_detail(request, fam_id: int):
         "party": party,
     })
 
-# --- Черновики броней по семье (для текущего гида) ----------------------------
+# --- Черновики броней по семье (лента на странице семьи) ---------------------
 class FamilyBookingDraftsView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, fam_id: int):
-        qs = BookingSale.objects.filter(family_id=fam_id)
+        qs = (BookingSale.objects
+              .filter(family_id=fam_id)
+              .select_related("company")
+              .order_by("-created_at"))
 
-        # ограничиваем по гиду только если юзер залогинен
-        user = getattr(request, "user", None)
-        if getattr(user, "is_authenticated", False) and user.id:
-            qs = qs.filter(guide_id=user.id)
+        rows = []
+        for b in qs:
+            rows.append({
+                "id": b.id,
+                "booking_code": b.booking_code,
+                "status": b.status,
+                "date": b.date.isoformat() if b.date else None,
+                "excursion_id": b.excursion_id,
+                "excursion_title": b.excursion_title,
+                "hotel_id": b.hotel_id,
+                "hotel_name": b.hotel_name,
+                "region_name": getattr(b, "region_name", "") or "",
+                "pickup_point_id": b.pickup_point_id,
+                "pickup_point_name": b.pickup_point_name,
+                "pickup_time_str": b.pickup_time_str,
+                "pickup_lat": getattr(b, "pickup_lat", None),
+                "pickup_lng": getattr(b, "pickup_lng", None),
+                "pickup_address": getattr(b, "pickup_address", ""),
+                "excursion_language": getattr(b, "excursion_language", None),
+                "room_number": getattr(b, "room_number", ""),
+                "adults": b.adults, "children": b.children, "infants": b.infants,
+                "price_source": getattr(b, "price_source", "PICKUP"),
+                "price_per_adult": str(getattr(b, "price_per_adult", 0) or 0),
+                "price_per_child": str(getattr(b, "price_per_child", 0) or 0),
+                "gross_total": str(b.gross_total or 0),
+                "net_total": str(getattr(b, "net_total", 0) or 0),
+                "commission": str(getattr(b, "commission", 0) or 0),
+                "company": CompanySerializer(getattr(b, "company", None)).data if getattr(b, "company_id", None) else None,
+                "created_at": b.created_at.isoformat() if b.created_at else None,
+                # удобные поля для фронта:
+                "maps_url": (
+                    f"https://maps.google.com/?q={b.pickup_lat},{b.pickup_lng}"
+                    if getattr(b, "pickup_lat", None) is not None and getattr(b, "pickup_lng", None) is not None
+                    else (f"https://maps.google.com/?q={b.pickup_point_name or b.hotel_name}"
+                          if (b.pickup_point_name or b.hotel_name) else None)
+                ),
+                "travelers_csv": getattr(b, "travelers_csv", "") or "",
+                "is_sendable": b.status in ("DRAFT",),      # кнопка «Отправить» только для черновиков
+                "is_sent": b.status in ("PENDING", "HOLD", "PAID", "CANCELLED", "EXPIRED"),
+            })
+        return Response(rows)
 
-        # (необязательно) если хочешь показывать только черновики/ожидающие:
-        # qs = qs.filter(status__in=["DRAFT", "PENDING"])
 
-        qs = qs.order_by("-created_at")
-        data = BookingSaleListSerializer(qs, many=True).data
-        return Response(data)
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -451,7 +488,7 @@ class BookingBatchPreviewView(APIView):
 
         user = _resolve_user(request)
 
-        qs = BookingSale.objects.filter(status="DRAFT")
+        qs = BookingSale.objects.filter(status="DRAFT").select_related("company")
         if user:
             qs = qs.filter(guide=user)
 
@@ -467,7 +504,11 @@ class BookingBatchPreviewView(APIView):
         total = 0
         for b in qs.order_by("-created_at"):
             gross = b.gross_total or 0
-            total += gross
+            try:
+                total += gross
+            except Exception:
+                total += 0
+
             items.append({
                 "id": b.id,
                 "booking_code": b.booking_code,
@@ -508,7 +549,7 @@ class BookingBatchSendView(APIView):
 
         user = _resolve_user(request)
 
-        qs = BookingSale.objects.filter(status="DRAFT")
+        qs = BookingSale.objects.filter(status="DRAFT").select_related("company")
         if user:
             qs = qs.filter(guide=user)
 
@@ -678,8 +719,8 @@ class SalesExcursionPickupsView(APIView):
             "excursion_title": title,
             "hotel_id": hotel_id,
             "date": date_str,
-            "count": len(pickups),
-            "results": pickups,
+            "count": len(results),
+            "results": results,     # ← ТАК, а не pickups
         })
 
 
@@ -778,12 +819,12 @@ def pricing_debug_signature(request):
     except Exception as e:
         return Response({"detail": str(e)}, status=500)
 
-def _weekday_slug(date_str: str) -> str | None:
-    try:
-        d = dt.date.fromisoformat(date_str)
-        return WEEKDAYS[d.weekday()]
-    except Exception:
-        return None
+# def _weekday_slug(date_str: str) -> str | None:
+#     try:
+#         d = dt.date.fromisoformat(date_str)
+#         return WEEKDAYS[d.weekday()]
+#     except Exception:
+#         return None
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
