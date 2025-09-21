@@ -1,27 +1,59 @@
-/* === Base reset (минимум) === */
+/* === Reset (минимум) === */
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
 body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+a { color: inherit; text-decoration: none; }
+h1, h2, h3 { margin: 0 0 .5rem 0; line-height: 1.2; }
 
-/* === Mobile-first comfy UI === */
+/* === Палитра (Light by default) === */
 :root {
   --bg: #ffffff;
-  --fg: #111827;      /* основной текст */
-  --muted: #4b5563;   /* вторичный текст */
-  --brand: #2563eb;   /* акцент/кнопки */
-  --border: #d1d5db;
+  --elev: #fafafa;            /* фон на карточках/панелях */
+  --fg: #111827;              /* основной текст */
+  --muted: #4b5563;           /* вторичный текст */
+  --brand: #2563eb;           /* акцент */
+  --brand-600: #1e40af;
+  --border: #e5e7eb;
   --focus: #0ea5e9;
+  --ok: #16a34a;
+  --warn: #f59e0b;
+  --err: #dc2626;
+  --shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.06);
 }
 
+/* === Авто Dark === */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0f17;
+    --elev: #111827;
+    --fg: #e5e7eb;
+    --muted: #9ca3af;
+    --brand: #60a5fa;
+    --brand-600: #3b82f6;
+    --border: #1f2937;
+    --focus: #22d3ee;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 30px rgba(0,0,0,.35);
+  }
+}
+
+/* === Принудительная тема: добавь .theme-dark на <html>, если нужно === */
+.theme-dark :root, html.theme-dark, body.theme-dark {
+  --bg:#0b0f17; --elev:#111827; --fg:#e5e7eb; --muted:#9ca3af; --brand:#60a5fa;
+  --brand-600:#3b82f6; --border:#1f2937; --focus:#22d3ee;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 12px 30px rgba(0,0,0,.35);
+}
+
+/* === Базовая типографика/фон === */
 html, body {
   background: var(--bg);
   color: var(--fg);
   -webkit-tap-highlight-color: transparent;
-  line-height: 1.35;
+  line-height: 1.4;
   font-size: 16px;
 }
 
-/* Контейнер с безопасными отступами (вырезы iOS) */
+/* Контейнер */
+.container { max-width: 720px; margin: 0 auto; }
 .app-padding {
   padding: max(16px, env(safe-area-inset-top))
            max(16px, env(safe-area-inset-right))
@@ -29,162 +61,289 @@ html, body {
            max(16px, env(safe-area-inset-left));
 }
 
-/* Текст/ссылки (минимум) */
-a { color: inherit; text-decoration: none; }
-h1, h2, h3 { margin: 0 0 .5rem 0; }
+/* Заголовки */
+h1 { font-size: clamp(20px, 2.2vw, 28px); font-weight: 800; }
 
-/* Формы */
+/* Текстовые состояния */
+.muted { color: var(--muted); }
+.divider {
+  height: 1px; background: var(--border);
+  margin: 12px 0;
+  opacity: .9;
+}
+
+/* === Карточки / панели === */
+.card {
+  background: var(--elev);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+.card.pad { padding: 12px; }
+
+/* === Формы === */
 .input, select, .btn {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--bg);
   color: var(--fg);
-  font-size: 16px; /* чтобы iOS не зумил */
+  font-size: 16px;
+  transition: border-color .15s ease, background .15s ease, box-shadow .15s ease, transform .02s;
 }
 .input:focus, select:focus, .btn:focus {
   outline: 3px solid color-mix(in srgb, var(--focus) 40%, transparent);
   outline-offset: 2px;
 }
+label > input[type="checkbox"] { width: 20px; height: 20px; }
 
-/* Кнопки приложения */
+/* === Кнопки (варианты) === */
 .btn {
-  border: none;
+  border: 1px solid transparent;
   background: var(--brand);
   color: #fff;
   font-weight: 700;
   cursor: pointer;
 }
-.btn[disabled] { opacity: .6; cursor: default; }
+.btn:hover { filter: brightness(1.02); box-shadow: 0 4px 18px color-mix(in srgb, var(--brand) 35%, transparent); }
+.btn:active { transform: translateY(1px); }
+.btn[disabled] { opacity: .6; cursor: default; box-shadow: none; }
 
-/* Карточки */
-.card {
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  background: #fff;
+.btn-outline {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--brand);
 }
+.btn-outline:hover { background: color-mix(in srgb, var(--brand) 12%, transparent); }
 
-/* React Day Picker — крупные, контрастные элементы */
-.rdp {
-  --rdp-accent-color: var(--brand);
-  --rdp-accent-background-color: color-mix(in srgb, var(--brand) 10%, white);
-  --rdp-background-color: #fff;
-  --rdp-cell-size: 44px;           /* большие ячейки для пальцев */
-  --rdp-caption-font-size: 16px;
-  --rdp-outline: 2px solid var(--focus);
-  --rdp-outline-selected: 2px solid var(--brand);
+.btn-ghost {
+  background: transparent;
+  color: var(--fg);
+  border-color: transparent;
 }
-.rdp-caption_label { font-weight: 700; }
-.rdp-head_cell { color: var(--muted); font-weight: 600; }
-.rdp-button_reset { border-radius: 10px; }
-.rdp-day_selected:not([disabled]),
-.rdp-day_selected:focus-visible { background: var(--brand); color: #fff; }
-.rdp-day_disabled { color: #9ca3af !important; opacity: .6; }
+.btn-ghost:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
-/* Dark mode — подстраиваем переменные */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:#0b0f17; --fg:#e5e7eb; --muted:#9ca3af; --border:#1f2937; --brand:#60a5fa; --focus:#22d3ee;
-  }
-  .card, .input, select, .btn { background:#0f141d; border-color:var(--border); }
-  .rdp { --rdp-background-color:#0f141d; }
-}
+.btn-danger { background: var(--err); }
+.btn-success { background: var(--ok); }
 
-/* Прилипшая CTA на мобильных */
+/* Прилипшая CTA */
 @media (max-width: 640px) {
-  .sticky-cta {
-    position: sticky;
-    bottom: max(8px, env(safe-area-inset-bottom));
-    z-index: 10;
-  }
-}
-
-/* ---------- Общие улучшения (и для десктопа тоже) ---------- */
-
-/* Контент-колонка: на широком экране не растягиваем слишком сильно */
-.container {
-  max-width: 720px;         /* приятная ширина для чтения */
-  margin: 0 auto;
-}
-
-/* Заголовки немного крупнее и плотнее */
-h1 { font-size: clamp(20px, 2.2vw, 28px); font-weight: 800; }
-
-/* Карточки: немного больше внутреннего воздуха */
-.card { padding: 10px; }
-
-/* Элементы форм — одинаковая высота и межстрочный интервал получше */
-.input, select, .btn {
-  min-height: 48px;
-  line-height: 1.25;
-}
-
-/* Чекбоксы легче попасть пальцем */
-label > input[type="checkbox"] {
-  width: 20px; height: 20px;
-}
-
-/* ---------- Мобильная настройка (≤ 640px) ---------- */
-@media (max-width: 640px) {
-  html, body { font-size: 17px; }  /* чуть крупнее базовый размер */
-
-  .app-padding {
-    padding-top: max(12px, env(safe-area-inset-top));
-    padding-right: max(12px, env(safe-area-inset-right));
-    padding-bottom: max(12px, env(safe-area-inset-bottom) + 56px); /* место под CTA */
-    padding-left: max(12px, env(safe-area-inset-left));
-  }
-
-  /* Увеличим вертикальные расстояния между блоками */
-  .stack-sm > * + * { margin-top: 8px; }
-  .stack-md > * + * { margin-top: 12px; }
-  .stack-lg > * + * { margin-top: 16px; }
-
-  /* Текстовые подсказки и вторичный текст контрастнее и крупнее */
-  .muted { color: var(--muted); font-size: 14px; }
-
-  /* Кнопка-CTA прилипает и растягивается на всю ширину */
   .sticky-cta {
     position: fixed;
     left: 0; right: 0;
     bottom: env(safe-area-inset-bottom);
-    width: 100%;
+    z-index: 10;
     border-radius: 0;
     padding: 16px;
     font-size: 17px;
   }
+}
 
-  /* Поля формы крупнее: легче попасть */
+/* === Бейджи (для статусов) === */
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 700;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+}
+.badge.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: #10b981; }
+.badge.warn { background: color-mix(in srgb, var(--warn) 22%, transparent); color: #f59e0b; }
+.badge.err { background: color-mix(in srgb, var(--err) 22%, transparent); color: #f87171; }
+
+/* === Строки-люди (чекбоксы) === */
+.person-row { padding: 12px; border-radius: 14px; gap: 10px; }
+.person-row input[type="checkbox"] { width: 22px; height: 22px; }
+
+/* === DayPicker (контраст) === */
+.rdp {
+  --rdp-accent-color: var(--brand);
+  --rdp-accent-background-color: color-mix(in srgb, var(--brand) 14%, transparent);
+  --rdp-background-color: var(--elev);
+  --rdp-cell-size: 44px;
+  --rdp-caption-font-size: 16px;
+  --rdp-outline: 2px solid var(--focus);
+  --rdp-outline-selected: 2px solid var(--brand);
+  color: var(--fg);
+}
+.rdp-caption_label { font-weight: 700; }
+.rdp-head_cell { color: var(--muted); font-weight: 600; }
+.rdp-button_reset { border-radius: 10px; }
+.rdp-day_selected:not([disabled]), .rdp-day_selected:focus-visible { background: var(--brand); color: #fff; }
+.rdp-day_disabled { color: #6b7280 !important; opacity: .55; }
+
+/* === Ленты/списки (черновики) === */
+.list { display: grid; gap: 8px; }
+.list-item {
+  display: grid; gap: 6px; padding: 10px;
+  background: var(--elev); border: 1px solid var(--border); border-radius: 12px;
+}
+.list-item .title { font-weight: 700; }
+.list-item .meta { font-size: 13px; color: var(--muted); }
+
+/* === Утилиты === */
+.stack-8 > * + * { margin-top: 8px; }
+.stack-12 > * + * { margin-top: 12px; }
+.stack-16 > * + * { margin-top: 16px; }
+
+/* ---------- Мобильные настройки ---------- */
+@media (max-width: 640px) {
+  html, body { font-size: 17px; }
+  .app-padding {
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-right: max(12px, env(safe-area-inset-right));
+    padding-bottom: max(12px, env(safe-area-inset-bottom) + 56px);
+    padding-left: max(12px, env(safe-area-inset-left));
+  }
   .input, select, .btn {
-    min-height: 52px;
-    padding: 14px 16px;
-    border-radius: 14px;
-    font-size: 17px;
+    min-height: 52px; padding: 14px 16px; border-radius: 14px; font-size: 17px;
   }
-
-  /* Чекбоксы с большим кликабельным лейблом */
-  .person-row {
-    padding: 12px;
-    border-radius: 14px;
-    gap: 10px;
-  }
-  .person-row input[type="checkbox"] {
-    width: 22px; height: 22px;
-  }
-
-  /* DayPicker: крупные навкнопки и заголовок месяца */
-  .rdp {
-    --rdp-cell-size: 46px;
-    --rdp-caption-font-size: 18px;
-  }
+  .rdp { --rdp-cell-size: 46px; --rdp-caption-font-size: 18px; }
   .rdp-nav_button { width: 44px; height: 44px; }
   .rdp-head_cell { padding: 10px 0; }
 }
 
-/* ---------- Очень маленькие экраны (≤ 380px) ---------- */
+/* ---------- Очень маленькие экраны ---------- */
 @media (max-width: 380px) {
   html, body { font-size: 16px; }
   .input, select, .btn { font-size: 16px; min-height: 50px; }
   .rdp { --rdp-cell-size: 44px; }
 }
+
+:root{
+  /* уровни поверхностей */
+  --surface-0: var(--bg);
+  --surface-1: #ffffff;
+  --surface-2: #f8fafc;
+  --shadow-1: 0 1px 2px rgba(0,0,0,.06), 0 1px 1px rgba(0,0,0,.04);
+  --shadow-2: 0 8px 24px rgba(0,0,0,.08);
+
+  /* размеры */
+  --radius-lg: 14px;
+  --radius-xl: 16px;
+  --btn-h: 48px;
+  --btn-pad: 12px 16px;
+  --btn-fz: 16px;
+}
+
+@media (prefers-color-scheme: dark){
+  :root{
+    --surface-1:#0f141d;
+    --surface-2:#121824;
+    --shadow-1: 0 1px 2px rgba(0,0,0,.45);
+    --shadow-2: 0 10px 28px rgba(0,0,0,.55);
+  }
+}
+
+/* секция с явным заголовком */
+.section { 
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-1);
+}
+.section + .section { margin-top: 12px; }
+
+.section__head{
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  font-weight: 700;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.section__body{ padding: 12px 14px; }
+.section__foot{
+  padding: 10px 14px;
+  border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  display: flex; gap: 8px; justify-content: flex-end; align-items: center;
+}
+
+/* «плашка» внутри секции — для подсказок/пикапов */
+.note {
+  background: var(--surface-2);
+  border: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: var(--radius-lg);
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.btn{
+  width: 100%;
+  min-height: var(--btn-h);
+  padding: var(--btn-pad);
+  font-size: var(--btn-fz);
+  border-radius: var(--radius-lg);
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: transform .02s ease, box-shadow .15s ease, background .15s ease, color .15s ease;
+}
+
+/* варианты */
+.btn-primary { background: var(--brand); color:#fff; border: none; box-shadow: var(--shadow-1); }
+.btn-primary:hover:not([disabled]) { transform: translateY(-1px); box-shadow: var(--shadow-2); }
+
+.btn-secondary { 
+  background: color-mix(in srgb, var(--brand) 12%, var(--surface-1));
+  color: var(--fg);
+  border: 1px solid color-mix(in srgb, var(--brand) 35%, var(--border));
+}
+.btn-secondary:hover:not([disabled]){
+  background: color-mix(in srgb, var(--brand) 16%, var(--surface-1));
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--brand);
+  border: 1px solid color-mix(in srgb, var(--brand) 60%, var(--border));
+}
+.btn-outline:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--brand) 12%, transparent);
+}
+
+.btn[disabled]{ opacity:.6; cursor: default; transform:none; box-shadow:none; }
+
+/* компактная кнопка-строка внутри черновиков */
+.btn-ghost{
+  width: auto; min-height: 36px; padding: 8px 12px; font-size: 14px;
+  background: transparent; border: 1px solid var(--border); color: var(--fg);
+  border-radius: 10px;
+}
+.btn-ghost:hover{ background: var(--surface-2); }
+
+/* заголовки блоков формы делаем контрастнее и компактнее */
+.label {
+  font-weight: 700; font-size: 14px; margin-bottom: 6px; color: var(--fg);
+}
+
+/* поля на «поверхности» */
+.input, select{
+  background: var(--surface-1);
+  border-radius: var(--radius-lg);
+  border-color: var(--border);
+}
+.input::placeholder{ color: color-mix(in srgb, var(--muted) 70%, transparent); }
+
+.drafts {
+  display: grid; gap: 10px;
+}
+.draft {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 10px 12px;
+  box-shadow: var(--shadow-1);
+}
+.draft__row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.draft__title { font-weight: 700; }
+.draft__meta { font-size: 12px; color: var(--muted); }
+.draft__sum { font-size: 14px; margin-top: 6px; }
+.badge {
+  display: inline-block; padding: 4px 8px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 15%, transparent);
+}
+
+.rdp { border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
+.rdp-months { padding: 6px; }
+
+

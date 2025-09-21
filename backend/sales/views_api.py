@@ -4,26 +4,41 @@ from datetime import date
 import datetime as dt
 from django.db.models import Q
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.shortcuts import render, get_object_or_404
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.dateparse import parse_date
+from django.utils.decorators import method_decorator
 from sales.services.costasolinfo import NotFoundError
 from .services import costasolinfo as csi
 from .services.costasolinfo import get_client, pricing_quote
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.views import APIView
-from rest_framework import status
-from .models import FamilyBooking, Traveler
+from rest_framework import status, viewsets
+from .models import FamilyBooking, Traveler, Company, BookingSale
+from .serializers import CompanySerializer, BookingSaleCreateSerializer, BookingSaleListSerializer
 import re, html
 import requests
 import logging
 import inspect
 
 WEEKDAYS = ["mon","tue","wed","thu","fri","sat","sun"]
+
+def _resolve_user(request):
+    """ Dev-fallback: если нет аутентификации — берём первого активного. """
+    u = getattr(request, "user", None)
+    if u and getattr(u, "is_authenticated", False):
+        return u
+    User = get_user_model()
+    return (
+        User.objects.filter(is_active=True)
+        .order_by("-is_superuser", "-is_staff", "id")
+        .first()
+    )
 
 def _normalize_name(s: str) -> str:
     """Убираем лишнее и приводим к нижнему регистру для сравнения."""
@@ -400,6 +415,117 @@ def family_detail(request, fam_id: int):
         "party": party,
     })
 
+# --- Черновики броней по семье (для текущего гида) ----------------------------
+class FamilyBookingDraftsView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, fam_id: int):
+        qs = BookingSale.objects.filter(family_id=fam_id)
+
+        # ограничиваем по гиду только если юзер залогинен
+        user = getattr(request, "user", None)
+        if getattr(user, "is_authenticated", False) and user.id:
+            qs = qs.filter(guide_id=user.id)
+
+        # (необязательно) если хочешь показывать только черновики/ожидающие:
+        # qs = qs.filter(status__in=["DRAFT", "PENDING"])
+
+        qs = qs.order_by("-created_at")
+        data = BookingSaleListSerializer(qs, many=True).data
+        return Response(data)
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class BookingBatchPreviewView(APIView):
+    """
+    POST /api/sales/bookings/batch/preview/
+    Body JSON: { "family_id": 123 } ИЛИ { "booking_ids": [1,2,3] }
+    Возвращает сводку черновиков текущего "гида" (status='DRAFT').
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        booking_ids = request.data.get("booking_ids") or []
+        family_id = request.data.get("family_id")
+
+        user = _resolve_user(request)
+
+        qs = BookingSale.objects.filter(status="DRAFT")
+        if user:
+            qs = qs.filter(guide=user)
+
+        try:
+            if family_id:
+                qs = qs.filter(family_id=family_id)
+            elif booking_ids:
+                qs = qs.filter(id__in=booking_ids)
+        except FieldError:
+            return Response({"detail": "В модели BookingSale нет поля family."}, status=400)
+
+        items = []
+        total = 0
+        for b in qs.order_by("-created_at"):
+            gross = b.gross_total or 0
+            total += gross
+            items.append({
+                "id": b.id,
+                "booking_code": b.booking_code,
+                "company": getattr(b.company, "name", None),
+                "date": b.date.isoformat() if b.date else None,
+                "excursion_id": b.excursion_id,
+                "excursion_title": b.excursion_title,
+                "hotel_name": b.hotel_name,
+                "pickup_point_name": b.pickup_point_name,
+                "pickup_time_str": b.pickup_time_str,
+                "excursion_language": getattr(b, "excursion_language", None),
+                "room_number": getattr(b, "room_number", ""),
+                "adults": b.adults, "children": b.children, "infants": b.infants,
+                "gross_total": str(gross),
+                "price_per_adult": str(getattr(b, "price_per_adult", 0) or 0),
+                "price_per_child": str(getattr(b, "price_per_child", 0) or 0),
+                "pickup_lat": getattr(b, "pickup_lat", None),
+                "pickup_lng": getattr(b, "pickup_lng", None),
+                "pickup_address": getattr(b, "pickup_address", ""),
+            })
+        return Response({"count": len(items), "total": f"{total:.2f}", "items": items}, status=200)
+
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class BookingBatchSendView(APIView):
+    """
+    POST /api/sales/bookings/batch/send/
+    Body JSON: { "family_id": 123 } ИЛИ { "booking_ids": [1,2,3] }
+    Переводит выбранные черновики из DRAFT -> PENDING и (опционально) запускает отправку.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        booking_ids = request.data.get("booking_ids") or []
+        family_id = request.data.get("family_id")
+
+        user = _resolve_user(request)
+
+        qs = BookingSale.objects.filter(status="DRAFT")
+        if user:
+            qs = qs.filter(guide=user)
+
+        try:
+            if family_id:
+                qs = qs.filter(family_id=family_id)
+            elif booking_ids:
+                qs = qs.filter(id__in=booking_ids)
+        except FieldError:
+            return Response({"detail": "В модели BookingSale нет поля family."}, status=400)
+
+        # тут можно собрать XLSX/почту; сейчас просто меняем статус
+        updated = qs.update(status="PENDING")
+        return Response({"updated": updated}, status=200)
+
+
+
 def _normalize_excursions(raw, compact: bool = True, limit: int | None = None, offset: int = 0):
     """
     Приводим ответ к единому формату { items: [ ... ], total: N }.
@@ -535,6 +661,17 @@ class SalesExcursionPickupsView(APIView):
         # 5) добавим заголовок экскурсии
         lang = (request.GET.get("lang") or request.headers.get("Accept-Language") or "ru")[:5]
         title = csi.excursion_title(excursion_id, lang=lang)
+
+        results = []
+        for it in pickups:
+            results.append({
+                "id": it.get("id"),
+                "point": it.get("name") or it.get("point"),
+                "time": it.get("time"),
+                "lat": it.get("lat"),
+                "lng": it.get("lng"),
+                "address": it.get("address") or "",
+            })
 
         return Response({
             "excursion_id": excursion_id,
@@ -747,3 +884,27 @@ def debug_raw_excursion(request):
         return JsonResponse({"detail": "excursion_id must be int"}, status=400)
     data = _get(f"/excursions/{exid}/", allow_404=True)
     return JsonResponse({"excursion_id": exid, "raw": data}, json_dumps_params={"ensure_ascii": False, "default": str})
+
+
+class CompanyViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Company.objects.filter(is_active=True).order_by("name")
+    serializer_class = CompanySerializer
+    permission_classes = [AllowAny]  # <-- было IsAuthenticated
+
+
+class BookingCreateView(APIView):
+    permission_classes = [AllowAny]  # ← временно для теста
+
+    def post(self, request):
+        ser = BookingSaleCreateSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        booking = ser.save()
+        return Response({"id": booking.id, "booking_code": booking.booking_code}, status=status.HTTP_200_OK)
+
+
+class BookingListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = BookingSale.objects.filter(guide=request.user).order_by("-created_at")[:200]
+        return Response(BookingSaleListSerializer(qs, many=True).data)
