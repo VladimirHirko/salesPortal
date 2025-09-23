@@ -2,6 +2,10 @@
 from collections import defaultdict
 from datetime import date
 import datetime as dt
+from django.utils import timezone
+from django.db import transaction
+from rest_framework.parsers import JSONParser
+
 from django.db.models import Q
 from django.core.exceptions import FieldError   # ← ДОБАВИТЬ
 from django.conf import settings
@@ -29,6 +33,41 @@ import logging
 import inspect
 
 WEEKDAYS = ["mon","tue","wed","thu","fri","sat","sun"]
+
+def _booking_to_json(b: BookingSale) -> dict:
+    return {
+        "id": b.id,
+        "booking_code": b.booking_code,
+        "status": b.status,
+        "family_id": getattr(b, "family_id", None),   # ← ДОБАВИЛИ
+        "date": b.date.isoformat() if b.date else None,
+        "excursion_id": b.excursion_id,
+        "excursion_title": b.excursion_title,
+        "hotel_id": b.hotel_id,
+        "hotel_name": b.hotel_name,
+        "region_name": getattr(b, "region_name", "") or "",
+        "pickup_point_id": b.pickup_point_id,
+        "pickup_point_name": b.pickup_point_name,
+        "pickup_time_str": b.pickup_time_str,
+        "pickup_lat": getattr(b, "pickup_lat", None),
+        "pickup_lng": getattr(b, "pickup_lng", None),
+        "pickup_address": getattr(b, "pickup_address", ""),
+        "excursion_language": getattr(b, "excursion_language", None),
+        "room_number": getattr(b, "room_number", ""),
+        "adults": b.adults,
+        "children": b.children,
+        "infants": b.infants,
+        "price_source": getattr(b, "price_source", "PICKUP"),
+        "price_per_adult": str(getattr(b, "price_per_adult", 0) or 0),
+        "price_per_child": str(getattr(b, "price_per_child", 0) or 0),
+        "gross_total": str(b.gross_total or 0),
+        "net_total": str(getattr(b, "net_total", 0) or 0),
+        "commission": str(getattr(b, "commission", 0) or 0),
+        "created_at": b.created_at.isoformat() if b.created_at else None,
+        "is_sendable": b.status in ("DRAFT",),
+        "is_sent": b.status in ("PENDING", "HOLD", "PAID", "CANCELLED", "EXPIRED"),
+    }
+
 
 def _resolve_user(request):
     """ Dev-fallback: если нет аутентификации — берём первого активного. """
@@ -528,6 +567,11 @@ class BookingBatchPreviewView(APIView):
                 "pickup_lat": getattr(b, "pickup_lat", None),
                 "pickup_lng": getattr(b, "pickup_lng", None),
                 "pickup_address": getattr(b, "pickup_address", ""),
+
+                # ↓↓↓ ВАЖНО: добавляем ↓↓↓
+                "status": b.status,          # фронт рисует бейдж и решает, можно ли отправить
+                "is_sendable": True,         # в этом превью мы уже отфильтровали DRAFT, значит «готово к отправке»
+                # (если когда-нибудь начнёте включать сюда не-DRAFT, ставьте логически: b.status == "DRAFT")
             })
         return Response({"count": len(items), "total": f"{total:.2f}", "items": items}, status=200)
 
@@ -564,6 +608,65 @@ class BookingBatchSendView(APIView):
         # тут можно собрать XLSX/почту; сейчас просто меняем статус
         updated = qs.update(status="PENDING")
         return Response({"updated": updated}, status=200)
+
+@method_decorator(csrf_exempt, name="dispatch")
+class BookingBatchCancelView(APIView):
+    """
+    POST /api/sales/bookings/batch/cancel/
+    Body JSON: { "booking_ids": [1,2,3] } ИЛИ { "family_id": 123, "reason": "..." }
+    Правила:
+      - DRAFT удалять/не трогать (не аннулируем)
+      - CANCELLED — идемпотентно (пропускаем)
+      - Остальные (PENDING/HOLD/PAID/CONFIRMED/EXPIRED) → CANCELLED
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @transaction.atomic
+    def post(self, request):
+        booking_ids = request.data.get("booking_ids") or []
+        family_id = request.data.get("family_id")
+        reason = (request.data.get("reason") or "").strip()
+
+        user = _resolve_user(request)
+
+        # Базовый queryset: все НЕ DRAFT (DRAFT не аннулируем)
+        qs = BookingSale.objects.exclude(status="DRAFT")
+        if user:
+            qs = qs.filter(guide=user)
+
+        try:
+            if family_id:
+                qs = qs.filter(family_id=family_id)
+            elif booking_ids:
+                qs = qs.filter(id__in=booking_ids)
+        except FieldError:
+            return Response({"detail": "В модели BookingSale нет поля family."}, status=400)
+
+        # Разделим на уже отменённые и подлежащие отмене
+        to_cancel = list(qs.exclude(status="CANCELLED").values_list("id", flat=True))
+        already = list(qs.filter(status="CANCELLED").values_list("id", flat=True))
+
+        if not to_cancel and not already:
+            return Response({"updated": 0, "cancelled_ids": [], "already_cancelled": []}, status=200)
+
+        # Обновляем статус/время/причину
+        now = timezone.now()
+        upd = {"status": "CANCELLED"}
+        # поля опциональны — обновляем, только если есть в модели
+        if hasattr(BookingSale, "cancelled_at"):
+            upd["cancelled_at"] = now
+        if hasattr(BookingSale, "cancel_reason") and reason:
+            # причину задаём только если прислали новую
+            qs.filter(id__in=to_cancel).update(cancel_reason=reason)
+
+        BookingSale.objects.filter(id__in=to_cancel).update(**upd)
+
+        return Response({
+            "updated": len(to_cancel),
+            "cancelled_ids": to_cancel,
+            "already_cancelled": already,
+        }, status=200)
 
 
 
@@ -949,3 +1052,116 @@ class BookingListView(APIView):
     def get(self, request):
         qs = BookingSale.objects.filter(guide=request.user).order_by("-created_at")[:200]
         return Response(BookingSaleListSerializer(qs, many=True).data)
+
+
+class BookingDetailView(APIView):
+    """
+    GET    /api/sales/bookings/<pk>/       → данные одной брони
+    PUT    /api/sales/bookings/<pk>/       → обновление (только если DRAFT)
+    PATCH  /api/sales/bookings/<pk>/       → частичное обновление (только если DRAFT)
+    DELETE /api/sales/bookings/<pk>/       → удаление (только если DRAFT)
+    """
+    permission_classes = [AllowAny]   # пока как и остальные тестовые эндпоинты
+
+    def get_object(self, pk: int) -> BookingSale:
+        return get_object_or_404(BookingSale, pk=pk)
+
+    def get(self, request, pk: int):
+        b = self.get_object(pk)
+        return Response(_booking_to_json(b), status=200)
+
+    @transaction.atomic
+    def delete(self, request, pk: int):
+        b = self.get_object(pk)
+        if b.status != "DRAFT":
+            return Response({"detail": "Only DRAFT bookings can be deleted"}, status=409)
+        b.delete()
+        return Response({"deleted": 1, "id": pk}, status=200)
+
+    @transaction.atomic
+    def put(self, request, pk: int):
+        return self._update(request, pk, partial=False)
+
+    @transaction.atomic
+    def patch(self, request, pk: int):
+        return self._update(request, pk, partial=True)
+
+    def _update(self, request, pk: int, partial: bool):
+        b = self.get_object(pk)
+        if b.status != "DRAFT":
+            return Response({"detail": "Only DRAFT bookings can be edited"}, status=409)
+
+        data = request.data or {}
+        # список разрешённых к правке полей
+        editable = {
+            "date", "room_number", "excursion_language",
+            "pickup_point_id", "pickup_point_name", "pickup_time_str",
+            "pickup_lat", "pickup_lng", "pickup_address",
+            "adults", "children", "infants",
+            "gross_total", "price_per_adult", "price_per_child",
+        }
+
+        # аккуратно приводим типы там, где нужно
+        for key, val in list(data.items()):
+            if key not in editable:
+                data.pop(key, None)
+
+        # date
+        if "date" in data and data["date"]:
+            try:
+                data["date"] = dt.date.fromisoformat(str(data["date"])[:10])
+            except Exception:
+                return Response({"detail": "Bad date format, use YYYY-MM-DD"}, status=400)
+
+        # числовые
+        for k in ("adults", "children", "infants"):
+            if k in data and data[k] is not None:
+                try: data[k] = int(data[k])
+                except Exception: return Response({"detail": f"{k} must be int"}, status=400)
+
+        for k in ("price_per_adult", "price_per_child", "gross_total"):
+            if k in data and data[k] is not None:
+                try: data[k] = float(data[k])
+                except Exception: return Response({"detail": f"{k} must be number"}, status=400)
+
+        # обновляем
+        for k, v in data.items():
+            setattr(b, k, v)
+        b.save(update_fields=[*data.keys()] or None)
+
+        return Response(_booking_to_json(b), status=200)
+
+
+class BookingCancelView(APIView):
+    """
+    POST /api/sales/bookings/<pk>/cancel/
+    Тело: {"reason": "по желанию клиента"} (опционально)
+    Правила:
+      - нельзя отменять DRAFT (их нужно просто удалить)
+      - повторная аннуляция idempotent (вернёт текущий статус)
+    """
+    permission_classes = [AllowAny]
+
+    @transaction.atomic
+    def post(self, request, pk: int):
+        b = get_object_or_404(BookingSale, pk=pk)
+
+        if b.status == "DRAFT":
+            return Response({"detail": "Draft cannot be cancelled, delete it instead"}, status=409)
+
+        if b.status == "CANCELLED":
+            # идемпотентность
+            return Response(_booking_to_json(b), status=200)
+
+        # помечаем как отменённую
+        b.status = "CANCELLED"
+        if hasattr(b, "cancelled_at"):
+            b.cancelled_at = timezone.now()
+        if hasattr(b, "cancel_reason"):
+            b.cancel_reason = (request.data or {}).get("reason") or b.cancel_reason
+
+        b.save(update_fields=["status", *([ "cancelled_at" ] if hasattr(b, "cancelled_at") else []),
+                              *([ "cancel_reason" ] if hasattr(b, "cancel_reason") else [])])
+
+        # здесь можно инициировать письмо в офис/интеграцию
+        return Response(_booking_to_json(b), status=200)

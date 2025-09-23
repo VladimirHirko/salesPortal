@@ -57,4 +57,9 @@ urlpatterns = [
     path("bookings/batch/preview/", v.BookingBatchPreviewView.as_view(), name="bookings-batch-preview"),
     path("bookings/batch/send/", v.BookingBatchSendView.as_view(), name="bookings-batch-send"),
 
+    # Бронирования — работа с отдельной бронью
+    path("bookings/<int:pk>/", v.BookingDetailView.as_view(), name="booking-detail"),  # GET/PUT/DELETE
+    path("bookings/<int:pk>/cancel/", v.BookingCancelView.as_view(), name="booking-cancel"),  # POST → аннуляция
+    path("bookings/batch/cancel/", v.BookingBatchCancelView.as_view(), name="bookings-batch-cancel"),  # POST {booking_ids:[...]}
+
 ]
