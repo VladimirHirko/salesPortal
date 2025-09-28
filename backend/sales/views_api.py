@@ -5,6 +5,7 @@ import datetime as dt
 from django.utils import timezone
 from django.db import transaction
 from rest_framework.parsers import JSONParser
+from sales.services.emails import send_booking_email
 
 from django.db.models import Q
 from django.core.exceptions import FieldError   # ← ДОБАВИТЬ
@@ -23,16 +24,43 @@ from .services.costasolinfo import get_client, pricing_quote
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
+from rest_framework.generics import RetrieveAPIView
 from rest_framework.views import APIView
 from rest_framework import status, viewsets
 from .models import FamilyBooking, Traveler, Company, BookingSale
-from .serializers import CompanySerializer, BookingSaleCreateSerializer, BookingSaleListSerializer
+from django.apps import apps
+from .serializers import (
+    CompanySerializer,
+    BookingSaleCreateSerializer,
+    BookingSaleListSerializer,
+    TravelerMiniSerializer,      # понадобится, если решишь оставить FBV
+    FamilyDetailSerializer,
+    BookingSaleDetailSerializer,      # для CBV
+)
+
 import re, html
 import requests
 import logging
 import inspect
 
 WEEKDAYS = ["mon","tue","wed","thu","fri","sat","sun"]
+
+FamilyBooking = apps.get_model('sales', 'FamilyBooking')
+
+class BookingSaleViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = BookingSale.objects.all()
+
+    def get_serializer_class(self):
+        # список -> краткий; деталка -> детальный
+        if self.action == "retrieve":
+            return BookingSaleDetailSerializer
+        return BookingSaleListSerializer
+
+class FamilyDetailView(RetrieveAPIView):
+    queryset = FamilyBooking.objects.all()   # без prefetch_related('party')
+    serializer_class = FamilyDetailSerializer
+    permission_classes = [AllowAny]
+
 
 def _booking_to_json(b: BookingSale) -> dict:
     return {
@@ -428,33 +456,80 @@ def _is_child(birth_date):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def family_detail(request, fam_id: int):
-    """
-    GET /api/sales/families/<fam_id>/
-    Возвращает карточку семьи с hotel_id и списком путешественников.
-    """
     from .models import FamilyBooking, Traveler
-
     fam = get_object_or_404(FamilyBooking, pk=fam_id)
+
+    def _iso(d):
+        try:
+            return d.isoformat() if d else None
+        except Exception:
+            return None
 
     party = []
     for t in Traveler.objects.filter(family=fam).order_by("last_name", "first_name"):
         party.append({
             "id": t.id,
-            "first_name": t.first_name,
-            "last_name": t.last_name,
-            "full_name": f"{t.last_name} {t.first_name}".strip(),
-            "is_child": _is_child(t.dob),
+            "first_name": t.first_name or "",
+            "last_name":  t.last_name or "",
+            "full_name":  f"{t.last_name or ''} {t.first_name or ''}".strip(),
+            "is_child":   _is_child(t.dob),
+
+            # ↓↓↓ ЭТИ ПОЛЯ НУЖНЫ ФРОНТУ ДЛЯ АВТО-ЗАПОЛНЕНИЯ ↓↓↓
+            "dob":              _iso(getattr(t, "dob", None)),
+            "nationality":      getattr(t, "nationality", "") or "",
+            "passport":         getattr(t, "passport", "") or "",
+            "passport_expiry":  _iso(getattr(t, "passport_expiry", None)),
+            "gender":           getattr(t, "gender", "") or "",      # "M" / "F" / ""
+            "doc_type":         getattr(t, "doc_type", "") or "",     # "passport" / "dni" / ""
+            "doc_expiry":       _iso(getattr(t, "doc_expiry", None)),
+            "email":            getattr(t, "email", "") or "",
+            "phone":            getattr(t, "phone", "") or "",
         })
 
     return Response({
         "id": fam.id,
-        "hotel_id": fam.hotel_id,                     # важно для пикапов/квоты
+        "hotel_id": fam.hotel_id,
         "hotel_name": fam.hotel_name,
         "checkin": fam.arrival_date.isoformat() if fam.arrival_date else None,
         "checkout": fam.departure_date.isoformat() if fam.departure_date else None,
-        "room": "",                                   # если позже появится поле — подставим его
+        "room": "",
         "party": party,
     })
+
+class TravelerPartialUpdateView(APIView):
+    permission_classes = [AllowAny]  # можно ужесточить позже
+
+    @transaction.atomic
+    def patch(self, request, pk: int):
+        t = get_object_or_404(Traveler, pk=pk)
+        data = request.data or {}
+
+        allowed = {"gender","doc_type","doc_expiry","passport","nationality","dob","passport_expiry"}
+        payload = {k: v for k, v in data.items() if k in allowed and v is not None}
+
+        # аккуратно парсим даты
+        for k in ("dob","doc_expiry","passport_expiry"):
+            if k in payload and payload[k]:
+                try:
+                    payload[k] = dt.date.fromisoformat(str(payload[k])[:10])
+                except Exception:
+                    return Response({"detail": f"Bad date for {k}, use YYYY-MM-DD"}, status=400)
+
+        for k, v in payload.items():
+            setattr(t, k, v)
+        t.save(update_fields=list(payload.keys()))
+
+        # вернём актуальный срез для фронта
+        return Response({
+            "id": t.id,
+            "gender": t.gender or "",
+            "doc_type": t.doc_type or "",
+            "doc_expiry": t.doc_expiry.isoformat() if t.doc_expiry else None,
+            "passport": t.passport or "",
+            "nationality": t.nationality or "",
+            "dob": t.dob.isoformat() if t.dob else None,
+            "passport_expiry": t.passport_expiry.isoformat() if t.passport_expiry else None,
+        })
 
 # --- Черновики броней по семье (лента на странице семьи) ---------------------
 class FamilyBookingDraftsView(APIView):
@@ -509,6 +584,71 @@ class FamilyBookingDraftsView(APIView):
         return Response(rows)
 
 
+SPECIAL_MAP = {
+    # требования «на каждого участника»
+    "granada":   {"all": ["first_name", "last_name", "passport", "nationality"]},
+    "gibraltar": {"all": ["nationality"]},
+    "tangier":   {"all": ["first_name", "last_name", "passport", "nationality", "gender", "dob", "doc_type", "doc_expiry"]},
+    "seville":   {"all": ["first_name", "last_name", "passport", "nationality", "dob"]},  # возраст считаем из dob
+}
+
+SPECIAL_TITLES = {
+    "granada":  ("granada", "гранада"),
+    "gibraltar":("gibraltar", "гибралтар"),
+    "tangier":  ("tanger", "tangier", "танжер"),
+    "seville":  ("seville", "севилья"),
+}
+
+def _guess_special_key(title: str | None) -> str | None:
+    s = (title or "").lower()
+    for key, needles in SPECIAL_TITLES.items():
+        if any(n in s for n in needles):
+            return key
+    return None
+
+def _parse_travelers_csv(csv: str) -> list[int]:
+    return [int(x) for x in str(csv or "").split(",") if x.strip().isdigit()]
+
+def _validate_booking_requirements(b) -> list[dict]:
+    """
+    Проверяет бронь b на спец-требования.
+    Возвращает список проблем:
+      {"booking_id": int, "traveler_id": int|None, "missing": [field,...]}
+    Пустой список = всё ок.
+    """
+    key = _guess_special_key(getattr(b, "excursion_title", ""))
+    if not key:
+        return []  # не спецэкскурсия
+
+    need = SPECIAL_MAP.get(key, {}).get("all", [])
+    trav_ids = _parse_travelers_csv(getattr(b, "travelers_csv", ""))
+
+    problems = []
+    if not trav_ids:
+        problems.append({"booking_id": b.id, "traveler_id": None, "missing": ["participants"]})
+        return problems
+
+    # Разом тянем нужные поля
+    fields = ["id", "first_name", "last_name", "passport", "nationality", "dob", "gender", "doc_type", "doc_expiry", "passport_expiry"]
+    travelers = {t.id: t for t in Traveler.objects.filter(id__in=trav_ids).only(*fields)}
+
+    for tid in trav_ids:
+        t = travelers.get(tid)
+        if not t:
+            problems.append({"booking_id": b.id, "traveler_id": tid, "missing": ["not_found"]})
+            continue
+        miss = []
+        for f in need:
+            val = getattr(t, f, None)
+            if not val:
+                # допускаем подмену doc_expiry на паспортный срок, если он есть
+                if f == "doc_expiry" and getattr(t, "passport_expiry", None):
+                    continue
+                miss.append(f)
+        if miss:
+            problems.append({"booking_id": b.id, "traveler_id": tid, "missing": miss})
+
+    return problems
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -540,13 +680,20 @@ class BookingBatchPreviewView(APIView):
             return Response({"detail": "В модели BookingSale нет поля family."}, status=400)
 
         items = []
-        total = 0
+        total = 0.0
+        blocked = 0
+
+        # Валидация спец-экскурсий на лету
+        problems_all = {}  # booking_id -> [problem,...]
+
         for b in qs.order_by("-created_at"):
-            gross = b.gross_total or 0
-            try:
-                total += gross
-            except Exception:
-                total += 0
+            gross = float(b.gross_total or 0)
+            total += gross
+
+            probs = _validate_booking_requirements(b)
+            if probs:
+                blocked += 1
+                problems_all[b.id] = probs
 
             items.append({
                 "id": b.id,
@@ -561,19 +708,26 @@ class BookingBatchPreviewView(APIView):
                 "excursion_language": getattr(b, "excursion_language", None),
                 "room_number": getattr(b, "room_number", ""),
                 "adults": b.adults, "children": b.children, "infants": b.infants,
-                "gross_total": str(gross),
+                "gross_total": f"{gross:.2f}",
                 "price_per_adult": str(getattr(b, "price_per_adult", 0) or 0),
                 "price_per_child": str(getattr(b, "price_per_child", 0) or 0),
                 "pickup_lat": getattr(b, "pickup_lat", None),
                 "pickup_lng": getattr(b, "pickup_lng", None),
                 "pickup_address": getattr(b, "pickup_address", ""),
-
-                # ↓↓↓ ВАЖНО: добавляем ↓↓↓
-                "status": b.status,          # фронт рисует бейдж и решает, можно ли отправить
-                "is_sendable": True,         # в этом превью мы уже отфильтровали DRAFT, значит «готово к отправке»
-                # (если когда-нибудь начнёте включать сюда не-DRAFT, ставьте логически: b.status == "DRAFT")
+                "status": b.status,
+                # можно отправить, только если DRAFT и нет проблем по требованиям
+                "is_sendable": (b.status == "DRAFT" and not probs),
+                # чтобы фронт красиво подсветил недостающие поля рядом с участниками
+                "problems": problems_all.get(b.id, []),
             })
-        return Response({"count": len(items), "total": f"{total:.2f}", "items": items}, status=200)
+
+        return Response({
+            "count": len(items),
+            "total": f"{total:.2f}",
+            "blocked": blocked,             # сколько броней нельзя отправить
+            "items": items,
+        }, status=200)
+
 
 
 
@@ -605,9 +759,49 @@ class BookingBatchSendView(APIView):
         except FieldError:
             return Response({"detail": "В модели BookingSale нет поля family."}, status=400)
 
-        # тут можно собрать XLSX/почту; сейчас просто меняем статус
-        updated = qs.update(status="PENDING")
-        return Response({"updated": updated}, status=200)
+        # Валидация перед отправкой: если есть «дыры» — 422 и список проблем
+        problems = []
+        for b in qs:
+            problems += _validate_booking_requirements(b)
+
+        if problems:
+            return Response(
+                {"detail": "Requirements missing", "problems": problems},
+                status=422  # Unprocessable Entity
+            )
+
+        # --- отправка писем + перевод статусов ---------------------------------------
+        bookings = list(qs)           # материализуем queryset, чтобы переиспользовать
+        sent_ids = []
+        failed_ids = []
+
+        for b in bookings:
+            try:
+                ok = send_booking_email(b, subject_prefix="[SalesPortal]")
+            except Exception:
+                ok = False
+            if ok:
+                sent_ids.append(b.id)
+            else:
+                failed_ids.append(b.id)
+
+        # Переводим в PENDING только те, что реально ушли
+        if sent_ids:
+            upd = {"status": "PENDING"}
+            if hasattr(BookingSale, "sent_at"):
+                upd["sent_at"] = timezone.now()
+            BookingSale.objects.filter(id__in=sent_ids).update(**upd)
+
+        return Response(
+            {
+                "sent": len(sent_ids),
+                "failed_ids": failed_ids,
+                "updated_to_pending": len(sent_ids),
+            },
+            status=200 if sent_ids and not failed_ids else 207  # 207 = частичный успех
+        )
+
+
 
 @method_decorator(csrf_exempt, name="dispatch")
 class BookingBatchCancelView(APIView):

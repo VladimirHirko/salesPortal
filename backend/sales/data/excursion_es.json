@@ -1,0 +1,22 @@
+{
+  "by_id": {
+    "101": "Sevilla",
+    "102": "Gibraltar",
+    "103": "Córdoba",
+    "104": "Ronda",
+    "105": "Tánger",
+    "106": "Caminito del Rey",
+    "107": "Nerja y Frigiliana"
+  },
+  "by_name": {
+    "севилья": "Sevilla",
+    "гибралтар": "Gibraltar",
+    "кордоба": "Córdoba",
+    "ронда": "Ronda",
+    "танжер": "Tánger",
+    "каминито дель рей": "Caminito del Rey",
+    "нерха": "Nerja",
+    "нерха и фрихилиана": "Nerja y Frigiliana",
+    "королевская тропа": "Caminito del Rey"
+  }
+}

@@ -2,6 +2,7 @@
 from django.db import models
 from django.contrib.auth.models import User
 import re
+from django.db import models
 
 
 # ↓ ДОБАВИМ справочник языков (используем на уровне брони)
@@ -9,6 +10,7 @@ LANG_CHOICES = (
     ("ru", "Русский"),
     ("en", "English"),
     ("es", "Español"),
+    ("fr", "Français"),
     ("de", "Deutsch"),
 )
 
@@ -17,6 +19,30 @@ PRICE_SOURCE = (
     ("REGION", "По региональным ценам"),
     ("MANUAL", "Указано вручную"),
 )
+
+class InboundEmail(models.Model):
+    uid = models.CharField(max_length=64, unique=True)  # IMAP UID сообщения
+    message_id = models.CharField(max_length=255, blank=True, null=True)
+    subject = models.CharField(max_length=512, blank=True, null=True)
+    from_email = models.CharField(max_length=255, blank=True, null=True)
+    to_email = models.CharField(max_length=255, blank=True, null=True)
+    date = models.DateTimeField(blank=True, null=True)
+
+    snippet = models.TextField(blank=True, null=True)     # первые N символов
+    body_text = models.TextField(blank=True, null=True)
+    body_html = models.TextField(blank=True, null=True)
+
+    raw_headers = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    booking = models.ForeignKey("BookingSale", null=True, blank=True, on_delete=models.SET_NULL)
+    
+    class Meta:
+        ordering = ["-date", "-id"]
+
+    def __str__(self):
+        return f"{self.subject or '(без темы)'} — {self.from_email}"
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # utils
@@ -172,6 +198,9 @@ class Traveler(models.Model):
     phone = models.CharField(max_length=64, blank=True)
     email = models.EmailField(blank=True)
     note = models.CharField(max_length=255, blank=True)
+    gender = models.CharField(max_length=1, choices=[('M','Male'),('F','Female')], null=True, blank=True)
+    doc_type = models.CharField(max_length=16, choices=[('passport','Passport'),('dni','DNI')], null=True, blank=True)
+    doc_expiry = models.DateField(null=True, blank=True)
 
     class Meta:
         unique_together = [("family", "last_name", "first_name", "dob")]

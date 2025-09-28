@@ -10,6 +10,8 @@ from .views_api import (
     BookingBatchPreviewView,
     BookingBatchSendView,
     BookingCreateView,
+    FamilyDetailView,
+    TravelerPartialUpdateView,
     # … остальные вьюхи, которые уже были подключены
 )
 
@@ -30,7 +32,9 @@ urlpatterns = [
     path("hotels/", v.hotels, name="hotels"),
     path("tourists/", v.tourists, name="tourists"),
     path("families/<int:fam_id>/", v.family_detail, name="family_detail"),
+    path("families/<int:pk>/", FamilyDetailView.as_view(), name="family-detail"),
     path("excursions/", v.excursions, name="excursions"),
+    path("travelers/<int:pk>/", TravelerPartialUpdateView.as_view(), name="traveler-partial"),
 
     # Пикапы
     path("pickups/v2/", v.SalesExcursionPickupsView.as_view(), name="pickups_v2"),

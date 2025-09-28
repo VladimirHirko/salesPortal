@@ -1,0 +1,130 @@
+{# backend/templates/sales/email_reservation.html #}
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Reserva de excursión</title>
+</head>
+<body style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#111827;">
+  <div style="max-width:760px;margin:0 auto;padding:16px;">
+    <h2 style="margin:0 0 12px 0;">Reserva de excursión</h2>
+
+    <!-- Cabecera -->
+    <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;font-size:14px;margin:0 0 12px 0;">
+      <tr>
+        <td style="padding:4px 0;width:40%;color:#6b7280;">Excursión:</td>
+        <td style="padding:4px 0;">
+          <b>{{ booking.title_es|default:booking.excursion_title }}</b>
+          {% if booking.excursion_language %} ({{ booking.excursion_language|upper }}){% endif %}
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:4px 0;color:#6b7280;">Fecha:</td>
+        <td style="padding:4px 0;">{{ booking.date|default:"—" }}</td>
+      </tr>
+      <tr>
+        <td style="padding:4px 0;color:#6b7280;">Compañía:</td>
+        <td style="padding:4px 0;">{{ booking.company.name|default:"—" }}</td>
+      </tr>
+      <tr>
+        <td style="padding:4px 0;color:#6b7280;">Order ID:</td>
+        <td style="padding:4px 0;">{{ booking.booking_code|default:"—" }}</td>
+      </tr>
+      <tr>
+        <td style="padding:4px 0;color:#6b7280;">Hotel:</td>
+        <td style="padding:4px 0;">{{ booking.hotel_name|default:"—" }} · Habitación: {{ booking.room_number|default:"—" }}</td>
+      </tr>
+      <tr>
+        <td style="padding:4px 0;color:#6b7280;">Pasajeros:</td>
+        <td style="padding:4px 0;">
+          Adultos: {{ booking.adults|default:"0" }}, Niños: {{ booking.children|default:"0" }}, Infantes: {{ booking.infants|default:"0" }}
+        </td>
+      </tr>
+    </table>
+
+    <!-- Punto de recogida -->
+    <div style="margin:12px 0 16px 0; padding:10px; border:1px solid #e5e7eb; border-radius:8px;">
+      <div style="font-weight:600;margin-bottom:6px;">Punto de recogida</div>
+      <div style="font-size:14px;line-height:1.4;">
+        {{ booking.pickup_point_name|default:"—" }}<br>
+        Hora: <b>{{ booking.pickup_time_str|default:"—" }}</b><br>
+        Dirección: {{ booking.pickup_address|default:"—" }}<br>
+        {% if booking.maps_url %}
+          <a href="{{ booking.maps_url }}">Abrir el mapa</a>
+        {% elif booking.pickup_lat and booking.pickup_lng %}
+          <a href="https://maps.google.com/?q={{ booking.pickup_lat }},{{ booking.pickup_lng }}">Abrir en el mapa</a>
+        {% else %}
+          <span style="color:#6b7280;">Enlace no disponible</span>
+        {% endif %}
+      </div>
+    </div>
+
+    {% with key=special_key %}
+      {% if not key %}
+        {# Экскурсия без спец-требований: показываем представителя семьи #}
+        {% for t in travelers|slice:":1" %}
+          <div style="margin:8px 0 0 0;font-size:14px;">
+            Apellido y nombre: <b>{{ t.last_name|default:"" }} {{ t.first_name|default:"" }}</b>
+          </div>
+        {% empty %}{% endfor %}
+      {% else %}
+        {# Спец-экскурсии: таблица участников #}
+        <table cellpadding="6" cellspacing="0" border="1" style="border-collapse:collapse; font-size:14px; width:100%;">
+          <thead style="background:#f9fafb;">
+            <tr>
+              <th align="left">Apellido</th>
+              <th align="left">Nombre</th>
+
+              {% if key == "granada" or key == "tangier" or key == "seville" %}
+                <th align="left">Pasaporte</th>
+              {% endif %}
+
+              {% if key == "granada" or key == "gibraltar" or key == "tangier" or key == "seville" %}
+                <th align="left">Nacionalidad</th>
+              {% endif %}
+
+              {% if key == "seville" or key == "tangier" %}
+                <th align="left">Fecha de nacimiento</th>
+              {% endif %}
+
+              {% if key == "tangier" %}
+                <th align="left">Género</th>
+                <th align="left">Tipo de documento</th>
+                <th align="left">Fecha de caducidad</th>
+              {% endif %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in travelers %}
+              <tr>
+                <td>{{ t.last_name|default:"—" }}</td>
+                <td>{{ t.first_name|default:"—" }}</td>
+
+                {% if key == "granada" or key == "tangier" or key == "seville" %}
+                  <td>{{ t.passport|default:"—" }}</td>
+                {% endif %}
+
+                {% if key == "granada" or key == "gibraltar" or key == "tangier" or key == "seville" %}
+                  <td>{{ t.nationality|default:"—" }}</td>
+                {% endif %}
+
+                {% if key == "seville" or key == "tangier" %}
+                  <td>{{ t.dob|default:"—" }}</td>
+                {% endif %}
+
+                {% if key == "tangier" %}
+                  <td>{{ t.gender|default:"—" }}</td>
+                  <td>{{ t.doc_type|default:"—" }}</td>
+                  <td>{{ t.doc_expiry|default:t.passport_expiry|default:"—" }}</td>
+                {% endif %}
+              </tr>
+            {% empty %}
+              <tr><td colspan="8" style="color:#6b7280;">No hay participantes</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    {% endwith %}
+  </div>
+</body>
+</html>

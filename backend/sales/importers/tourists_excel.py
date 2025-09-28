@@ -1,9 +1,9 @@
+
+
 # sales/importers/tourists_excel.py
 from __future__ import annotations
 
-import os
 import re
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
@@ -102,10 +102,45 @@ COLMAP = {
     "nationality": ["Национальность", "Nationality"],
     "passport": ["Паспорт", "Passport", "Doc number"],
     "passport_expiry": ["Срок действия паспорта", "Passport expiry", "Expiry"],
+    "gender": ["Пол", "Sex", "Gender"],   # ← ДОБАВИЛИ
+    "doc_type": ["Тип документа", "Document type", "Doc type", "Тип док."],
+    "doc_expiry": ["Срок действия документа", "Document expiry", "Doc expiry", "Expiry date"],
     "phone": ["Телефон", "Phone", "Номер телефона", "Контактный телефон"],
     "email": ["Email", "E-mail", "Эл. почта", "Почта"],
     "note": ["Примечание", "Note", "Комментарий"],
 }
+
+def norm_gender(val: str | None) -> str | None:
+    if not val:
+        return None
+    s = str(val).strip().upper().rstrip(".")
+    if s in ("M", "MALE", "М", "МУЖ", "MR"):
+        return "M"
+    if s in ("F", "FEMALE", "Ж", "ЖЕН", "MRS", "MS", "MISS"):
+        return "F"
+    return None
+
+def norm_doc_type(val: str | None) -> str | None:
+    if not val:
+        return None
+    s = str(val).strip().lower().replace(".", "")
+    if s in ("passport", "pass", "паспорт", "загранпаспорт"):
+        return "passport"
+    if s in ("dni", "id", "id card", "ид", "удостоверение", "нацпаспорт"):
+        return "dni"
+    return None
+
+# --- вверху файла рядом с _norm и пр. добавь такую же нормализацию имён ---
+def _norm_name_excel(s: str) -> str:
+    """Повторяем логику _norm_name из модели (или максимально близко).
+       Важно: она должна давать тот же результат, что и в Traveler.save()."""
+    if s is None:
+        return ""
+    s = str(s).strip()
+    # примеры: убираем лишние пробелы, приводим к Title Case
+    s = re.sub(r"\s+", " ", s)
+    return s.title()
+
 
 
 # ---------- авто-детекция строки заголовков ----------
@@ -189,88 +224,101 @@ def import_tourists_excel(file, dry_run: bool = True) -> Dict[str, Any]:
             "dry_run": dry_run,
         }
 
-    @transaction.atomic
     def _do():
         for idx, row in df.iterrows():
-            hotel_raw = str(row.get(cols["hotel"], "")).strip()
-            if not hotel_raw:
-                report.issues.append(RowIssue(idx + 2, "Пустой отель"))
-                report.skipped += 1
-                continue
+            # отдельный savepoint на каждую строку
+            with transaction.atomic():
+                hotel_raw = str(row.get(cols["hotel"], "")).strip()
+                if not hotel_raw:
+                    report.issues.append(RowIssue(idx + 2, "Пустой отель"))
+                    report.skipped += 1
+                    continue
 
-            hotel_id, hotel_name, region_name = _resolve_hotel(hotel_raw)
+                hotel_id, hotel_name, region_name = _resolve_hotel(hotel_raw)
 
-            ref_code = str(row.get(cols.get("ref_code"), "")).strip() if cols.get("ref_code") else ""
-            arrival = _parse_date(row.get(cols.get("arrival"))) if cols.get("arrival") else None
-            departure = _parse_date(row.get(cols.get("departure"))) if cols.get("departure") else None
+                ref_code = str(row.get(cols.get("ref_code"), "")).strip() if cols.get("ref_code") else ""
+                arrival = _parse_date(row.get(cols.get("arrival"))) if cols.get("arrival") else None
+                departure = _parse_date(row.get(cols.get("departure"))) if cols.get("departure") else None
 
-            fam = (
-                FamilyBooking.objects.filter(ref_code=ref_code or "", hotel_id=hotel_id or 0).first()
-            )
-            if not fam:
-                fam = FamilyBooking.objects.create(
-                    ref_code=ref_code or "",
-                    hotel_id=hotel_id or 0,
-                    hotel_name=hotel_name,
-                    region_name=region_name,
-                    arrival_date=arrival,
-                    departure_date=departure,
-                )
-                report.created_families += 1
-            else:
-                changed = False
-                if arrival and fam.arrival_date != arrival:
-                    fam.arrival_date = arrival
-                    changed = True
-                if departure and fam.departure_date != departure:
-                    fam.departure_date = departure
-                    changed = True
-                if hotel_name and fam.hotel_name != hotel_name:
-                    fam.hotel_name = hotel_name
-                    changed = True
-                if region_name and fam.region_name != region_name:
-                    fam.region_name = region_name
-                    changed = True
-                if changed:
-                    fam.save(update_fields=["arrival_date", "departure_date", "hotel_name", "region_name"])
-                    report.updated_families += 1
-
-            # Traveler уникален в пределах семьи по (last_name, first_name, dob)
-            last_name = str(row.get(cols["last_name"], "")).strip()
-            first_name = str(row.get(cols["first_name"], "")).strip()
-            middle_name = str(row.get(cols.get("middle_name"), "")).strip() if cols.get("middle_name") else ""
-            dob = _parse_date(row.get(cols.get("dob"))) if cols.get("dob") else None
-
-            defaults = {
-                "middle_name": middle_name,
-                "nationality": str(row.get(cols.get("nationality"), "")).strip() if cols.get("nationality") else "",
-                "passport": str(row.get(cols.get("passport"), "")).strip() if cols.get("passport") else "",
-                "passport_expiry": _parse_date(row.get(cols.get("passport_expiry"))) if cols.get("passport_expiry") else None,
-                "phone": str(row.get(cols.get("phone"), "")).strip() if cols.get("phone") else "",
-                "email": str(row.get(cols.get("email"), "")).strip() if cols.get("email") else "",
-                "note": str(row.get(cols.get("note"), "")).strip() if cols.get("note") else "",
-            }
-
-            try:
-                # если дубликат — просто не создаём второй
-                _obj, created = Traveler.objects.get_or_create(
-                    family=fam,
-                    last_name=last_name,
-                    first_name=first_name,
-                    dob=dob,
-                    defaults=defaults,
-                )
-                if created:
-                    report.created_travelers += 1
+                fam = FamilyBooking.objects.filter(ref_code=ref_code or "", hotel_id=hotel_id or 0).first()
+                if not fam:
+                    fam = FamilyBooking.objects.create(
+                        ref_code=ref_code or "",
+                        hotel_id=hotel_id or 0,
+                        hotel_name=hotel_name,
+                        region_name=region_name,
+                        arrival_date=arrival,
+                        departure_date=departure,
+                    )
+                    report.created_families += 1
                 else:
-                    # при желании можно обновлять defaults у существующего
-                    pass
-            except IntegrityError:
-                report.skipped += 1
-                report.issues.append(RowIssue(idx + 2, "Дублирующийся турист (уникальность нарушена)",
-                                              {"family_id": fam.id, "last_name": last_name, "first_name": first_name, "dob": dob}))
+                    changed = False
+                    if arrival and fam.arrival_date != arrival:
+                        fam.arrival_date = arrival
+                        changed = True
+                    if departure and fam.departure_date != departure:
+                        fam.departure_date = departure
+                        changed = True
+                    if hotel_name and fam.hotel_name != hotel_name:
+                        fam.hotel_name = hotel_name
+                        changed = True
+                    if region_name and fam.region_name != region_name:
+                        fam.region_name = region_name
+                        changed = True
+                    if changed:
+                        fam.save(update_fields=["arrival_date", "departure_date", "hotel_name", "region_name"])
+                        report.updated_families += 1
+
+                # Traveler уникален в пределах семьи по (last_name, first_name, dob)
+                last_name = str(row.get(cols["last_name"], "")).strip()
+                first_name = str(row.get(cols["first_name"], "")).strip()
+                middle_name = str(row.get(cols.get("middle_name"), "")).strip() if cols.get("middle_name") else ""
+                dob = _parse_date(row.get(cols.get("dob"))) if cols.get("dob") else None
+
+                defaults = {
+                    "middle_name": middle_name,
+                    "nationality": str(row.get(cols.get("nationality"), "")).strip() if cols.get("nationality") else "",
+                    "passport": str(row.get(cols.get("passport"), "")).strip() if cols.get("passport") else "",
+                    "passport_expiry": _parse_date(row.get(cols.get("passport_expiry"))) if cols.get("passport_expiry") else None,
+                    "phone": str(row.get(cols.get("phone"), "")).strip() if cols.get("phone") else "",
+                    "email": str(row.get(cols.get("email"), "")).strip() if cols.get("email") else "",
+                    "note": str(row.get(cols.get("note"), "")).strip() if cols.get("note") else "",
+                }
+
+                # безопасная логика: get_or_create + обновление полей, без вставки дублей
+                try:
+                    obj, created = Traveler.objects.get_or_create(
+                        family=fam,
+                        last_name=last_name,
+                        first_name=first_name,
+                        dob=dob,
+                        defaults={k: v for k, v in defaults.items() if v not in (None, "", pd.NaT)},
+                    )
+                    if created:
+                        report.created_travelers += 1
+                    else:
+                        # обновляем только непустые и изменившиеся поля
+                        changed_fields = []
+                        for k, v in defaults.items():
+                            if v not in (None, "", pd.NaT):
+                                cur = getattr(obj, k, None)
+                                if cur != v:
+                                    setattr(obj, k, v)
+                                    changed_fields.append(k)
+                        if changed_fields:
+                            obj.save(update_fields=changed_fields)
+
+                except IntegrityError:
+                    # крайне редко (гонка/нормализация в save) — помечаем как пропуск и едем дальше
+                    report.skipped += 1
+                    report.issues.append(RowIssue(
+                        idx + 2,
+                        "Дублирующийся турист (уникальность нарушена)",
+                        {"family_id": fam.id, "last_name": last_name, "first_name": first_name, "dob": dob}
+                    ))
 
     if dry_run:
+        # сухой прогон откатывает всё
         with transaction.atomic():
             _do()
             transaction.set_rollback(True)
@@ -299,6 +347,6 @@ def import_file(up_file: BinaryIO, dry_run: bool = False) -> dict:
         "families_created": int(result.get("created_families", 0)),
         "travelers_created": int(result.get("created_travelers", 0)),
         "skipped": int(result.get("skipped", 0)),
-        # опционально можно вернуть сырой отчёт:
-        # "_raw": result
+        # "_raw": result  # можно вернуть подробный отчёт при необходимости
     }
+

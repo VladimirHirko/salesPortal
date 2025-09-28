@@ -3,10 +3,32 @@ from django.contrib import admin, messages
 from django.template.response import TemplateResponse
 from django.urls import path
 from django.shortcuts import redirect
+from django.utils.html import format_html
+from django.core.management import call_command
 
-from .models import Company, GuideProfile, BookingSale, FamilyBooking, Traveler
+from .models import Company, GuideProfile, BookingSale, FamilyBooking, Traveler, InboundEmail
 from .forms import TouristsImportForm
 from .importers import tourists_excel  # импортёр Excel
+
+import logging
+log = logging.getLogger(__name__)
+
+@admin.action(description="Проверить входящие Gmail сейчас")
+def fetch_gmail_now(modeladmin, request, queryset):
+    call_command("fetch_gmail")
+    modeladmin.message_user(request, "Готово: входящие обновлены.")
+
+@admin.register(InboundEmail)
+class InboundEmailAdmin(admin.ModelAdmin):
+    list_display = ("subject","from_email","date","created_at")
+    search_fields = ("subject","from_email","to_email","snippet","body_text")
+    readonly_fields = ("uid","message_id","raw_headers","created_at","html_preview")
+
+    actions = [fetch_gmail_now]
+
+    def html_preview(self, obj):
+        return format_html('<div style="border:1px solid #eee;padding:8px;">{}</div>', obj.body_html or "—")
+    html_preview.short_description = "HTML"
 
 # ── BookingSale ─────────────────────────────────────────────────────────────────
 @admin.register(BookingSale)
@@ -84,7 +106,6 @@ class FamilyBookingAdmin(admin.ModelAdmin):
     search_fields = ("ref_code", "hotel_name", "region_name", "phone", "email")
     list_filter = ("arrival_date", "region_name")
 
-    # кнопка «Импорт туристов» на change_list
     change_list_template = "admin/sales/familybooking/change_list.html"
 
     def get_urls(self):
@@ -122,6 +143,9 @@ class FamilyBookingAdmin(admin.ModelAdmin):
                     )
                     return redirect("admin:sales_familybooking_changelist")
                 except Exception as e:
+                    # логируем полный traceback в консоль/файл
+                    log.exception("Ошибка при импорте туристов")
+                    # пользователю выводим короткое сообщение
                     messages.error(request, f"Ошибка импорта: {e}")
             else:
                 messages.error(request, f"Проверьте форму: {form.errors.as_text()}")
@@ -134,9 +158,9 @@ class FamilyBookingAdmin(admin.ModelAdmin):
 # ── Traveler ───────────────────────────────────────────────────────────────────
 @admin.register(Traveler)
 class TravelerAdmin(admin.ModelAdmin):
-    list_display = ("last_name", "first_name", "dob", "family")
-    search_fields = ("last_name", "first_name", "passport", "email", "phone")
-    list_filter = ("dob",)
+    list_display = ("last_name","first_name","dob","nationality","passport","passport_expiry","gender","doc_type","doc_expiry","family")
+    list_filter  = ("gender","doc_type","nationality","family")
+    search_fields = ("last_name","first_name","passport","email","phone")
 
 # ── Прочие справочники (одиночная регистрация, без дублей) ─────────────────────
 @admin.register(Company)

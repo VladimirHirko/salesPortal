@@ -224,3 +224,26 @@ MEDIA_ROOT = BASE_DIR / "media"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+
+load_dotenv(os.path.join(BASE_DIR, '..', '.env'))  # скорректируй путь под себя
+
+def _clean(s):
+    if s is None:
+        return None
+    # убрать обычные пробелы и неразрывные
+    return s.replace('\u00a0','').strip()
+
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = _clean(os.environ.get("EMAIL_HOST", "smtp.gmail.com"))
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", 587))
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS","true").lower() == "true"
+
+EMAIL_HOST_USER = _clean(os.environ.get("EMAIL_HOST_USER"))
+EMAIL_HOST_PASSWORD = _clean(os.environ.get("EMAIL_HOST_PASSWORD"))
+
+DEFAULT_FROM_EMAIL = f'{os.environ.get("EMAIL_FROM_NAME","SalesPortal")} <{EMAIL_HOST_USER}>'
+SERVER_EMAIL = DEFAULT_FROM_EMAIL  # от кого приходят письма об ошибках
+
+EMAIL_SUBJECT_PREFIX = "[SalesPortal] "

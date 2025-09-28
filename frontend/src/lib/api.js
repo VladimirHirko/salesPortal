@@ -77,3 +77,16 @@ export async function cancelBooking(id, reason = '') {
   return j; // возвращаем объект брони
 }
 
+export async function patchTraveler(id, payload) {
+  const r = await fetch(`/api/sales/travelers/${id}/`, {
+    method: 'PATCH',
+    headers: { 'Content-Type':'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  const text = await r.text();
+  const j = text ? JSON.parse(text) : null;
+  if (!r.ok) throw new Error(j?.detail || `HTTP ${r.status}`);
+  return j;
+}
+

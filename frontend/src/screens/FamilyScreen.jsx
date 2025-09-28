@@ -4,9 +4,23 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { DayPicker } from 'react-day-picker';
 import Modal from '../components/Modal.jsx';
 import { previewBatch, sendBatch } from '../lib/api.js';
+import SpecialTravelerFields from '../components/SpecialTravelerFields.jsx';
+import { patchTraveler } from '../lib/api.js';
 
 // ===== helpers: дни недели / даты ============================================
 const WEEKDAY_CODE_TO_NUM = { mon:1, tue:2, wed:3, thu:4, fri:5, sat:6, sun:0 };
+
+// function onTravelerExtraChange(id, field, value) {
+//   // оптимистично обновим fam.party в памяти
+//   setFam(f => {
+//     if (!f) return f;
+//     const party = Array.isArray(f.party) ? f.party : [];
+//     return { ...f, party: party.map(t => t.id === id ? { ...t, [field]: value } : t) };
+//   });
+//   // и сохраним на бэке (PATCH /api/sales/travelers/:id/)
+//   patchTraveler(id, { [field]: value }).catch(() => {});
+// }
+
 
 function toWeekdayNums(ex) {
   if (!ex) return [];
@@ -163,6 +177,14 @@ function statusBadge(status){
 }
 
 /* ↓↓↓ ВСТАВИТЬ СЮДА ↓↓↓ */
+function detectSpecialKey(title='') {
+  const s = String(title).toLowerCase();
+  if (s.includes('танжер') || s.includes('tang')) return 'tangier';
+  if (s.includes('гранад')) return 'granada';
+  if (s.includes('гибрал') || s.includes('gibr')) return 'gibraltar';
+  if (s.includes('севиль') || s.includes('sevil')) return 'seville';
+  return 'regular';
+}
 const canDelete = b => (b.status || b.ui_state) === 'DRAFT';
 const canCancel = b => {
   const s = (b.status || b.ui_state) || '';
@@ -192,6 +214,11 @@ export default function FamilyScreen() {
   const [excursionLanguage, setExcursionLanguage] = useState(''); // 'ru'|'en'|...
   const [excursionId, setExcursionId] = useState('');
   const [date, setDate] = useState('');
+    const selectedExcursion = useMemo(
+    () => excursions.find(x => String(x.id) === String(excursionId)) || null,
+    [excursions, excursionId]
+  );
+  const selectedExcursionTitle = selectedExcursion?.title || selectedExcursion?.localized_title || '';
 
   // производные
   const [availableDates, setAvailableDates] = useState([]);
@@ -218,6 +245,36 @@ export default function FamilyScreen() {
   const [editMode, setEditMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]); // id черновиков, выбранных для отправки/удаления
 
+    // локальный обработчик для спец-полей (гендер/тип док-та/даты и т.п.)
+    function onTravelerExtraChange(id, field, value) {
+      // нормализация кодов под Django choices
+      let v = value;
+      if (field === 'gender') {
+        const s = String(value || '').trim().toUpperCase().replace('.', '');
+        v = (s === 'M' || s === 'MALE' || s === 'М' || s === 'МУЖ' || s === 'MR') ? 'M'
+          : (s === 'F' || s === 'FEMALE' || s === 'Ж' || s === 'ЖЕН' || ['MRS','MS','MISS'].includes(s)) ? 'F'
+          : '';
+      }
+      if (field === 'doc_type') {
+        const s = String(value || '').trim().toLowerCase().replace('.', '');
+        v = (['passport','pass','паспорт','загранпаспорт'].includes(s)) ? 'passport'
+          : (['dni','id','id card','ид','удостоверение','нацпаспорт'].includes(s)) ? 'dni'
+          : '';
+      }
+      // оптимистично обновляем локальный state семьи
+      setFam(f => {
+        if (!f) return f;
+        const party = Array.isArray(f.party) ? f.party : [];
+        return { ...f, party: party.map(t => t.id === id ? { ...t, [field]: v } : t) };
+      });
+      // отправляем на бэк
+      patchTraveler(id, { [field]: v }).catch(err => {
+        // при ошибке можно откатить локально или показать тост
+        console.error('patchTraveler failed', err);
+      });
+    }
+
+  
   // ===== загрузка семьи, экскурсий, компаний =================================
   useEffect(() => {
     if (!familyId) {
@@ -407,7 +464,8 @@ export default function FamilyScreen() {
         credentials: 'include',
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
       if (!res.ok) throw new Error(data?.detail || JSON.stringify(data));
 
       // обновляем черновики
@@ -651,6 +709,25 @@ export default function FamilyScreen() {
           <div className="muted">Выбрано: взрослых {adultsCount}, детей {childrenCount}</div>
         </div>
       </div>
+
+      {/* Доп. поля для специальных экскурсий (для каждого выбранного туриста) */}
+      {detectSpecialKey(selectedExcursionTitle) !== 'regular' && (
+        <div className="section">
+          <div className="section__head">Дополнительные данные для спец-экскурсии</div>
+          <div className="section__body" style={{ display:'grid', gap:12 }}>
+            {(fam?.party || [])
+              .filter(t => sel.includes(t.id))
+              .map(t => (
+                <SpecialTravelerFields
+                  key={t.id}
+                  traveler={t}
+                  excursionTitle={selectedExcursionTitle}
+                  onChange={onTravelerExtraChange}
+                />
+              ))}
+          </div>
+        </div>
+      )}
 
       {/* Экскурсия */}
       <div className="section">
