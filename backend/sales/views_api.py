@@ -6,6 +6,8 @@ from django.utils import timezone
 from django.db import transaction
 from rest_framework.parsers import JSONParser
 from sales.services.emails import send_booking_email
+from sales.services.titles import excursion_title_es
+from sales.services.emails import send_cancellation_email
 
 from django.db.models import Q
 from django.core.exceptions import FieldError   # ← ДОБАВИТЬ
@@ -844,53 +846,56 @@ class BookingBatchCancelView(APIView):
         if not to_cancel and not already:
             return Response({"updated": 0, "cancelled_ids": [], "already_cancelled": []}, status=200)
 
-        # Обновляем статус/время/причину
+        # 1) Письма об аннуляции (не прерывают процесс, просто считаем успех/ошибки)
+        emailed_ok, emailed_fail = [], []
+        for b in BookingSale.objects.filter(id__in=to_cancel):
+            try:
+                ok = send_cancellation_email(b, reason)
+            except Exception:
+                ok = False
+            (emailed_ok if ok else emailed_fail).append(b.id)
+
+        # 2) Обновляем статус/время/причину для всех к аннуляции
         now = timezone.now()
         upd = {"status": "CANCELLED"}
-        # поля опциональны — обновляем, только если есть в модели
         if hasattr(BookingSale, "cancelled_at"):
             upd["cancelled_at"] = now
-        if hasattr(BookingSale, "cancel_reason") and reason:
-            # причину задаём только если прислали новую
-            qs.filter(id__in=to_cancel).update(cancel_reason=reason)
-
         BookingSale.objects.filter(id__in=to_cancel).update(**upd)
+
+        # причину пишем отдельным апдейтом, только если она передана и поле есть
+        if reason and hasattr(BookingSale, "cancel_reason"):
+            BookingSale.objects.filter(id__in=to_cancel).update(cancel_reason=reason)
 
         return Response({
             "updated": len(to_cancel),
-            "cancelled_ids": to_cancel,
-            "already_cancelled": already,
+            "cancelled_ids": to_cancel,      # все, кому сменили статус
+            "already_cancelled": already,    # были отменены раньше
+            "email_sent_ok": emailed_ok,     # для логов/индикаторов на фронте
+            "email_failed_ids": emailed_fail
         }, status=200)
 
 
 
 def _normalize_excursions(raw, compact: bool = True, limit: int | None = None, offset: int = 0):
-    """
-    Приводим ответ к единому формату { items: [ ... ], total: N }.
-    Поддерживаем как массив, так и {items: [...]} из старого API.
-    """
     items = raw.get("items") if isinstance(raw, dict) else raw
     if not isinstance(items, list):
         items = []
 
     total = len(items)
-    # пагинация на нашей стороне (простая)
     if limit is not None:
         items = items[offset: offset + limit]
 
     norm = []
     for it in items:
-        # исходные поля
         _id = it.get("id")
         title = it.get("localized_title") or it.get("title") or ""
         description_html = it.get("localized_description") or it.get("description") or ""
         image = it.get("image")
         duration = it.get("duration")
         direction = it.get("direction")
-        # дни – могут прийти и кодами, и цифрами; соберём оба и унифицируем
+
         days_code = it.get("days") or []
         days_num = it.get("available_days") or []
-        # добьём отсутствующие представления
         if not days_code and days_num:
             days_code = [WEEKDAY_NUM_TO_CODE.get(n) for n in days_num if n in WEEKDAY_NUM_TO_CODE]
         if not days_num and days_code:
@@ -899,20 +904,19 @@ def _normalize_excursions(raw, compact: bool = True, limit: int | None = None, o
         languages = it.get("tour_languages") or it.get("languages") or []
 
         if compact:
-            short = _strip_html(description_html)[:220].rstrip()  # короткое описание ~ 220 симв.
+            short = _strip_html(description_html)[:220].rstrip()
             norm.append({
                 "id": _id,
                 "title": title,
                 "short_description": short,
                 "duration": duration,
                 "direction": direction,
-                "days": days_code,              # ["thu", ...]
-                "available_days": days_num,     # [3, ...]
-                "languages": languages,
+                "days": days_code,          # ["thu", ...]
+                "available_days": days_num, # [3, ...]
+                "languages": languages,     # <= ВАЖНО для выпадающего списка языков
                 "image": image,
             })
         else:
-            # полный вариант, оставляем HTML
             norm.append({
                 "id": _id,
                 "title": title,
@@ -926,13 +930,35 @@ def _normalize_excursions(raw, compact: bool = True, limit: int | None = None, o
             })
     return {"items": norm, "total": total}
 
+def _es_title_overrides() -> dict[int, str]:
+    """
+    Необязательная мапа {excursion_id: 'Sevilla', ...} из вашей админки core,
+    чтобы (если нужно) добавить поле title_es к ответу — не затрагивая title.
+    """
+    try:
+        CoreExcursion = apps.get_model('core', 'Excursion')
+    except Exception:
+        return {}
+    rows = (
+        CoreExcursion.objects
+        .filter(is_active=True)
+        .exclude(csi_id__isnull=True)
+        .values("csi_id", "name")
+    )
+    out = {}
+    for r in rows:
+        try:
+            out[int(r["csi_id"])] = r["name"] or ""
+        except Exception:
+            pass
+    return out
+
 @api_view(["GET"])
 def excursions(request):
     lang = request.query_params.get("lang", "ru")
     date = request.query_params.get("date")
     region = request.query_params.get("region")
     compact = request.query_params.get("compact", "1") not in ("0", "false", "False")
-    # простая пагинация
     try:
         limit = int(request.query_params.get("limit", "20"))
     except ValueError:
@@ -942,8 +968,18 @@ def excursions(request):
     except ValueError:
         offset = 0
 
+    # <-- ВАЖНО: всегда используем CSI как источник, чтобы не потерять languages
     raw = csi.list_excursions(lang=lang, date=date, region=region)
     data = _normalize_excursions(raw, compact=compact, limit=limit, offset=offset)
+
+    # Необязательное: добавим title_es, если есть в админке core (не ломает фронт)
+    es_map = _es_title_overrides()
+    if es_map:
+        for it in data["items"]:
+            es = es_map.get(int(it["id"] or 0))
+            if es:
+                it["title_es"] = es
+
     return Response(data)
 
 
@@ -1327,13 +1363,6 @@ class BookingDetailView(APIView):
 
 
 class BookingCancelView(APIView):
-    """
-    POST /api/sales/bookings/<pk>/cancel/
-    Тело: {"reason": "по желанию клиента"} (опционально)
-    Правила:
-      - нельзя отменять DRAFT (их нужно просто удалить)
-      - повторная аннуляция idempotent (вернёт текущий статус)
-    """
     permission_classes = [AllowAny]
 
     @transaction.atomic
@@ -1344,18 +1373,22 @@ class BookingCancelView(APIView):
             return Response({"detail": "Draft cannot be cancelled, delete it instead"}, status=409)
 
         if b.status == "CANCELLED":
-            # идемпотентность
             return Response(_booking_to_json(b), status=200)
 
-        # помечаем как отменённую
+        reason = (request.data or {}).get("reason") or ""
+
+        # отправляем письмо (до изменения статуса; если письмо не ушло — всё равно продолжаем)
+        try:
+            send_cancellation_email(b, reason)
+        except Exception:
+            pass
+
         b.status = "CANCELLED"
         if hasattr(b, "cancelled_at"):
             b.cancelled_at = timezone.now()
         if hasattr(b, "cancel_reason"):
-            b.cancel_reason = (request.data or {}).get("reason") or b.cancel_reason
-
+            b.cancel_reason = reason or b.cancel_reason
         b.save(update_fields=["status", *([ "cancelled_at" ] if hasattr(b, "cancelled_at") else []),
                               *([ "cancel_reason" ] if hasattr(b, "cancel_reason") else [])])
 
-        # здесь можно инициировать письмо в офис/интеграцию
         return Response(_booking_to_json(b), status=200)

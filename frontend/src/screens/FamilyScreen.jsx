@@ -580,6 +580,33 @@ export default function FamilyScreen() {
     }
   }
 
+  async function cancelOne(id) {
+    // можно спросить причину
+    const reason = window.prompt('Причина аннуляции (необязательно):', '');
+    if (reason === null) return; // пользователь передумал
+
+    try {
+      const resp = await fetch(`/api/sales/bookings/${id}/cancel/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ reason })
+      });
+      const j = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(j?.detail || `HTTP ${resp.status}`);
+
+      // перечитаем список, чтобы карточка тут же посерела как "Отменено"
+      const r2 = await fetch(`/api/sales/bookings/family/${familyId}/drafts/?_=${Date.now()}`, {
+        credentials: 'include'
+      });
+      const j2 = r2.ok ? await r2.json() : [];
+      setDrafts(Array.isArray(j2) ? j2 : (j2.items || []));
+    } catch (e) {
+      alert('Не удалось аннулировать: ' + (e?.message || String(e)));
+    }
+  }
+
+
   async function handleCancelSelected() {
     if (!selectedIds.length) return;
 
@@ -929,6 +956,36 @@ export default function FamilyScreen() {
                   )}
 
                   <div className="draft__sum">{fmtMoney(b.gross_total || 0, 'EUR')}</div>
+                  <div className="draft__actions" style={{ marginTop: 6, display: 'flex', gap: 6 }}>
+                    {/* Аннулировать можно всё, что уже не DRAFT и ещё не CANCELLED */}
+                    {canCancel(b) && (
+                      <button
+                        className="btn btn-xs btn-warning"
+                        onClick={() => cancelOne(b.id)}
+                        title="Аннулировать бронь и отправить письмо в офис"
+                      >
+                        Аннулировать
+                      </button>
+                    )}
+                    {/* (опционально) удалить доступно только для DRAFT */}
+                    {canDelete(b) && (
+                      <button
+                        className="btn btn-xs btn-outline"
+                        onClick={async () => {
+                          if (!confirm('Удалить черновик?')) return;
+                          await fetch(`/api/sales/bookings/${b.id}/`, { method: 'DELETE', credentials: 'include' });
+                          // обновим ленту
+                          const r2 = await fetch(`/api/sales/bookings/family/${familyId}/drafts/?_=${Date.now()}`, { credentials: 'include' });
+                          const j2 = r2.ok ? await r2.json() : [];
+                          setDrafts(Array.isArray(j2) ? j2 : (j2.items || []));
+                        }}
+                        title="Удалить черновик"
+                      >
+                        Удалить
+                      </button>
+                    )}
+                  </div>
+
                 </div>
               );
             })}
