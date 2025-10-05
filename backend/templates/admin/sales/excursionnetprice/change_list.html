@@ -1,0 +1,11 @@
+{% extends "admin/change_list.html" %}
+{% load static %}
+
+{% block object-tools-items %}
+  {{ block.super }}
+  <li>
+    <a class="button" href="{% url 'admin:sales_netprice_matrix' %}">
+      Матрица нетто-цен
+    </a>
+  </li>
+{% endblock %}

@@ -10,7 +10,7 @@
       <tr>
         <td style="padding:4px 0;width:40%;color:#6b7280;">Excursión:</td>
         <td style="padding:4px 0;">
-          <b>{{ booking.title_es|default:booking.excursion_title }}</b>
+          <b>{{ booking.title_es|default:booking.title_bi_html|safe }}</b>
           {% if booking.excursion_language %} ({{ booking.excursion_language|upper }}){% endif %}
         </td>
       </tr>

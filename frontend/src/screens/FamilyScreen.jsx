@@ -93,6 +93,24 @@ function calcDraftsTotal(list) {
   return sum;
 }
 
+// Универсальный парсер форматов: [], {items:[...]}, {results:[...]}
+function parseItemsPayload(json) {
+  if (Array.isArray(json)) return json;
+  if (!json || typeof json !== 'object') return [];
+  if (Array.isArray(json.items)) return json.items;
+  if (Array.isArray(json.results)) return json.results;
+  return [];
+}
+
+// ===== helpers: суммы по статусу =============================================
+const asNumber = v => parseFloat(String(v || 0).replace(',', '.')) || 0;
+
+function sumByStatuses(list, statuses) {
+  return (list || [])
+    .filter(b => statuses.has(b.status || b.ui_state))
+    .reduce((acc, b) => acc + asNumber(b.gross_total), 0);
+}
+
 const fmtMoney = (v, cur = 'EUR') =>
   new Intl.NumberFormat(undefined, {
     style: 'currency',
@@ -230,7 +248,16 @@ export default function FamilyScreen() {
 
   // черновики
   const [drafts, setDrafts] = useState([]);
-  const draftsTotal = useMemo(() => calcDraftsTotal(drafts), [drafts]);
+
+  // суммы для футера
+  const totalActive = useMemo(
+    () => sumByStatuses(drafts, new Set(['DRAFT','PENDING','HOLD','PAID','CONFIRMED'])),
+    [drafts]
+  );
+  const totalCancelled = useMemo(
+    () => sumByStatuses(drafts, new Set(['CANCELLED','EXPIRED'])),
+    [drafts]
+  );
 
   // загрузки/ошибки
   const [bookingLoading, setBookingLoading] = useState(false);
@@ -310,22 +337,47 @@ export default function FamilyScreen() {
     })();
   }, [familyId]);
 
-  // перечитать черновики по семье
+  // перечитать брони по семье (все статусы) + безопасный фолбэк на preview
   useEffect(() => {
     if (!familyId) return;
     let aborted = false;
+
     (async () => {
-      const r = await fetch(`/api/sales/bookings/family/${familyId}/drafts/?_=${Date.now()}`, {
-        cache: 'no-store',
-        credentials: 'include'
-      });
-      if (!aborted && r.ok) {
-        const json = await r.json();
-        setDrafts(Array.isArray(json) ? json : json.items || []);
-      } else if (!aborted) {
-        setDrafts([]);
+      // 1) основной запрос
+      try {
+        const url = `/api/sales/bookings/family/${familyId}/drafts/?_=${Date.now()}`;
+        const r = await fetch(url, { cache: 'no-store', credentials: 'include' });
+        const text = await r.text();
+        if (aborted) return;
+
+        if (r.ok) {
+          let json = [];
+          try { json = text ? JSON.parse(text) : []; } catch (e) {
+            console.error('family bookings JSON parse error', e, text);
+            json = [];
+          }
+          const items = parseItemsPayload(json); // понимает [], {items:[]}, {results:[]}
+          if (items.length) {
+            setDrafts(items);
+            return; // успех — выходим
+          }
+        } else {
+          console.error('family bookings fetch failed', r.status, text);
+        }
+      } catch (e) {
+        console.error('family bookings fetch exception', e);
+      }
+
+      // 2) фолбэк: подтянем хотя бы предпросмотр, чтобы карточки не пустели
+      try {
+        const prev = await previewBatch(familyId);
+        const items = Array.isArray(prev?.items) ? prev.items : [];
+        if (!aborted) setDrafts(items);
+      } catch (e) {
+        if (!aborted) setDrafts([]);
       }
     })();
+
     return () => { aborted = true; };
   }, [familyId]);
 
@@ -930,12 +982,11 @@ export default function FamilyScreen() {
                 <div key={b.id} className="draft">
                   <div className="draft__row">
                     <div className="draft__title">
-                      {b.excursion_title || `Экскурсия #${b.excursion_id}`}
-                      {/* Бейдж статуса */}
-                      {st === "DRAFT" && <span className="badge badge-info" style={{ marginLeft: 8 }}>Готово к отправке</span>}
-                      {st === "PENDING" && <span className="badge badge-warning" style={{ marginLeft: 8 }}>Отправлено</span>}
-                      {st === "CONFIRMED" && <span className="badge badge-success" style={{ marginLeft: 8 }}>Подтверждено</span>}
-                      {st === "CANCELLED" && <span className="badge badge-muted" style={{ marginLeft: 8 }}>Отменено</span>}
+                      {(b.excursion_title_bi || b.excursion_title_es && `${b.excursion_title} (${b.excursion_title_es})` || b.excursion_title || `Экскурсия #${b.excursion_id}`)}
+                      {st === "DRAFT"     && <span className="badge badge-info"     style={{ marginLeft: 8 }}>Готово к отправке</span>}
+                      {st === "PENDING"   && <span className="badge badge-warning"  style={{ marginLeft: 8 }}>Отправлено</span>}
+                      {st === "CONFIRMED" && <span className="badge badge-success"  style={{ marginLeft: 8 }}>Подтверждено</span>}
+                      {st === "CANCELLED" && <span className="badge badge-muted"    style={{ marginLeft: 8 }}>Отменено</span>}
                     </div>
                     <div className="draft__meta">{b.date || '—'}</div>
                   </div>
@@ -993,12 +1044,12 @@ export default function FamilyScreen() {
 
           <div className="section__foot">
             <div className="muted" style={{ marginRight: 'auto' }}>
-              Итого по черновикам: <b>{fmtMoney(draftsTotal, 'EUR')}</b>
+              Итого по активным: <b>{fmtMoney(totalActive, 'EUR')}</b>
+              <span className="muted" style={{ marginLeft: 12 }}>
+                (отменённые: {fmtMoney(totalCancelled, 'EUR')})
+              </span>
             </div>
-
-            <button className="btn btn-secondary" onClick={loadPreview}>
-              Предпросмотр
-            </button>
+            <button className="btn btn-secondary" onClick={loadPreview}>Предпросмотр</button>
           </div>
         </div>
       )}
@@ -1060,7 +1111,7 @@ export default function FamilyScreen() {
                         </td>
                       )}
                       <td>{it.booking_code}</td>
-                      <td>{it.excursion_title}</td>
+                      <td>{it.excursion_title_bi || (it.excursion_title_es && `${it.excursion_title} (${it.excursion_title_es})`) || it.excursion_title}</td>
                       <td>{it.date || '—'}</td>
                       <td>{it.excursion_language || '—'}</td>
                       <td>{it.room_number || '—'}</td>

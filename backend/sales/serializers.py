@@ -8,6 +8,8 @@ from django.db import transaction
 from rest_framework import serializers
 from .models import Company, BookingSale, Traveler, FamilyBooking
 from datetime import date
+from django.conf import settings
+import requests
 
 
 # Справочник компаний для фронта
@@ -181,8 +183,43 @@ class BookingSaleCreateSerializer(serializers.ModelSerializer):
         from django.utils.crypto import get_random_string
         return get_random_string(10).upper()
 
+    def _resolve_region_by_hotel(self, hotel_id: int) -> str | None:
+        """
+        Запрашивает CostaSolinfo по hotel_id и возвращает region/region_slug.
+        Возвращает None при любой ошибке или отсутствии данных.
+        """
+        if not hotel_id:
+            return None
+        # ленивые импорты, чтобы не ломать окружение при тестах
+        from django.conf import settings
+        import requests
+
+        base = getattr(settings, "CSI_API_BASE", None) or getattr(settings, "CSI", {}).get("BASE")
+        timeout = getattr(settings, "CSI_HTTP_TIMEOUT", 6.0)
+        token = getattr(settings, "CSI", {}).get("TOKEN", "") if hasattr(settings, "CSI") else ""
+        if not base:
+            return None
+        try:
+            r = requests.get(
+                f"{str(base).rstrip('/')}/api/hotels/{int(hotel_id)}/",
+                headers={"Authorization": f"Bearer {token}"} if token else {},
+                timeout=timeout,
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json() or {}
+            region = (data.get("region") or data.get("region_slug") or "").strip()
+            return region or None
+        except Exception:
+            return None
+
     @transaction.atomic  # важно, чтобы всё создавалось/падало единым блоком
     def create(self, validated_data):
+        from decimal import Decimal, ROUND_HALF_UP
+        from django.contrib.auth import get_user_model
+        from django.db.models import Q
+        from django.apps import apps
+
         # 0) служебные поля из validated_data
         company_id = validated_data.pop("company_id")
         fam_id     = validated_data.pop("family_id", None)
@@ -204,7 +241,7 @@ class BookingSaleCreateSerializer(serializers.ModelSerializer):
         family = None
         if fam_id:
             FB = apps.get_model('sales', 'FamilyBooking')
-            family = FB.objects.filter(pk=fam_id).first()
+            family = FB.objects.filter(pk=fam_id).only("id", "region_name").first()
             if not family:
                 raise serializers.ValidationError({"family_id": "Семья не найдена."})
 
@@ -300,12 +337,30 @@ class BookingSaleCreateSerializer(serializers.ModelSerializer):
                         )
         # -------------------------------------------------------------------------
 
+        # ---- ВЫЧИСЛЯЕМ И ФИКСИРУЕМ region_name ---------------------------------
+        region = (validated_data.get("region_name") or "").strip()
+
+        # 1) если есть family.region_name — он приоритетен
+        if (not region) and family and getattr(family, "region_name", None):
+            reg = str(family.region_name).strip()
+            if reg:
+                region = reg
+
+        # 2) иначе пробуем получить по hotel_id из CostaSolinfo
+        if not region:
+            hotel_id = validated_data.get("hotel_id")
+            region = self._resolve_region_by_hotel(hotel_id) or ""
+
+        # гарантированно проставим в запись (пусть даже пустую строку)
+        validated_data["region_name"] = region
+        # -------------------------------------------------------------------------
+
         # 6) создать запись
         kwargs = {
             "company": company,
             "guide": guide_user,
             "booking_code": self._make_code(),
-            **validated_data,  # уже содержит status и travelers_csv
+            **validated_data,  # уже содержит status, travelers_csv и region_name
         }
         if hasattr(BookingSale, "family"):
             kwargs["family"] = family
@@ -318,6 +373,7 @@ class BookingSaleCreateSerializer(serializers.ModelSerializer):
             booking.save(update_fields=["travelers_csv"])
 
         return booking
+
 
 
 

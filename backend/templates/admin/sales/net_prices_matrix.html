@@ -1,0 +1,73 @@
+{% extends "admin/base_site.html" %}
+{% load extras %}
+
+{% load static %}
+{% net_saved saved ex.id reg sel_company|default_if_none:0 as row %}
+
+
+{% block content %}
+<h1>Матрица нетто-цен</h1>
+
+<form method="get" style="margin-bottom: 12px;">
+  <label>Компания:&nbsp;</label>
+  <select name="company" onchange="this.form.submit()">
+    <option value="">— для всех компаний —</option>
+    {% for c in companies %}
+      <option value="{{ c.id }}" {% if sel_company == c.id %}selected{% endif %}>{{ c.name }}</option>
+    {% endfor %}
+  </select>
+</form>
+
+<form method="post" novalidate>
+  {% csrf_token %}
+  <div class="results">
+    <table class="table table-striped" style="min-width: 960px;">
+      <thead>
+        <tr>
+          <th>Экскурсия</th>
+          <th>Регион</th>
+          <th>Нетто (взрослый)</th>
+          <th>Нетто (ребёнок)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for ex in excursions %}
+          {% for reg in ex.region_slugs %}
+            {% net_saved saved ex.id reg sel_company|default_if_none:0 as row %}
+            <tr>
+              {% if forloop.first %}
+                <td rowspan="{{ ex.region_slugs|length }}">
+                  <strong>{{ ex.title }}</strong><br>
+                  <small>ex#{{ ex.id }}</small>
+                </td>
+              {% endif %}
+              <td><code>{{ reg }}</code></td>
+              <td>
+                <input type="text"
+                       name="price-{{ ex.id }}-{{ reg }}-adult"
+                       value="{{ row.net_per_adult|default_if_none:'' }}"
+                       class="vTextField"
+                       style="width:120px;">
+              </td>
+              <td>
+                <input type="text"
+                       name="price-{{ ex.id }}-{{ reg }}-child"
+                       value="{{ row.net_per_child|default_if_none:'' }}"
+                       class="vTextField"
+                       style="width:120px;">
+              </td>
+            </tr>
+          {% endfor %}
+        {% empty %}
+          <tr><td colspan="4" class="warning">Нет данных по экскурсиям.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:12px;">
+    <button type="submit" class="button default">Сохранить</button>
+    <a href="{% url 'admin:sales_excursionnetprice_changelist' %}" class="button">Назад к списку</a>
+  </div>
+</form>
+{% endblock %}
