@@ -1,6 +1,8 @@
 # sales/views_api.py
 from collections import defaultdict
 from datetime import date
+from decimal import Decimal
+
 import datetime as dt
 from django.utils import timezone
 from django.db import transaction
@@ -13,17 +15,20 @@ from sales.services.titles import spanish_excursion_name, compose_bilingual_titl
 from django.db.models import Q
 from django.core.exceptions import FieldError   # ← ДОБАВИТЬ
 from django.conf import settings
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, authenticate, login as auth_login
 from django.shortcuts import render, get_object_or_404
 from django.http import JsonResponse
-from django.views.decorators.http import require_GET
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie, csrf_protect
+from django.middleware.csrf import get_token
 from django.utils.dateparse import parse_date
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import never_cache
 from sales.services.costasolinfo import NotFoundError
 from .services import costasolinfo as csi
 from .services.costasolinfo import get_client, pricing_quote
+from rest_framework.authentication import SessionAuthentication
+
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
@@ -45,10 +50,56 @@ import re, html
 import requests
 import logging
 import inspect
+import json
 
 WEEKDAYS = ["mon","tue","wed","thu","fri","sat","sun"]
 
 FamilyBooking = apps.get_model('sales', 'FamilyBooking')
+
+@ensure_csrf_cookie
+def csrf_view(request):
+    """
+    GET /api/sales/csrf/
+    Отдаёт токен в JSON и ставит csrftoken cookie.
+    Работает даже когда CSRF cookie HttpOnly.
+    """
+    return JsonResponse({'csrftoken': get_token(request), 'detail': 'CSRF cookie set'})
+
+@require_POST
+@csrf_protect
+@ensure_csrf_cookie
+def login_view(request):
+    """
+    POST /api/sales/login/
+    Body: {"username": "...", "password": "..."}
+    Успех: ставим sessionid (Set-Cookie) и возвращаем 200 JSON.
+    Ошибка: 400/401 с detail.
+    """
+    try:
+        data = json.loads(request.body.decode('utf-8') or "{}")
+    except Exception:
+        data = {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+
+    if not username or not password:
+        return JsonResponse({'detail': 'Username/password required'}, status=400)
+
+    user = authenticate(request, username=username, password=password)
+    if user is None:
+        return JsonResponse({'detail': 'Invalid credentials'}, status=401)
+
+    # ВАЖНО: именно это создаёт сессию и даёт Set-Cookie: sessionid=...
+    auth_login(request, user)
+
+    # опционально: срок жизни сессии (например, 12 часов)
+    request.session.set_expiry(12 * 60 * 60)
+
+    return JsonResponse({
+        'detail': 'ok',
+        'username': user.get_username(),
+        'ts': timezone.now().isoformat(),
+    }, status=200)
 
 class BookingSaleViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = BookingSale.objects.all()
@@ -220,7 +271,7 @@ log = logging.getLogger(__name__)
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
-def login_view(request): return JsonResponse({"ok": True})
+# def login_view(request): return JsonResponse({"ok": True})
 
 def _csi_url(path: str) -> str:
     """Надёжно склеивает CSI_API_BASE и относительный путь."""
@@ -346,14 +397,22 @@ def tourists(request):
     # 2) модели
     from .models import FamilyBooking, Traveler
 
-    # 3) все семейные брони по отелю (icontains — нечувствительно к регистру)
-    fam_ids = list(
-        FamilyBooking.objects
-        .filter(hotel_name__icontains=hotel_name)
-        .values_list("id", flat=True)
-    )
+    # 3) семейные брони по отелю (без регистрозависимости).
+    #    По умолчанию скрываем тех, у кого выезд уже прошёл.
+    #    Чтобы показать всех, передай ?include_past=1
+    today = timezone.localdate()
+    include_past = request.query_params.get("include_past") in ("1", "true", "True")
+
+    fam_qs = FamilyBooking.objects.filter(hotel_name__icontains=hotel_name)
+    if not include_past:
+        fam_qs = fam_qs.filter(
+            Q(departure_date__isnull=True) | Q(departure_date__gte=today)
+        )
+
+    fam_ids = list(fam_qs.values_list("id", flat=True))
     if not fam_ids:
         return Response({"items": []})
+
 
     # 4) выбираем путешественников этих семей
     trav_qs = Traveler.objects.filter(family_id__in=fam_ids)
@@ -415,9 +474,11 @@ def tourists(request):
     return Response({"items": items})
 
 def _tourists_count_by_hotel_name(name: str) -> int:
-    # считаем именно путешественников (distinct на случай задвоений)
+    today = timezone.localdate()
     fam_ids = list(
-        FamilyBooking.objects.filter(hotel_name__icontains=name)
+        FamilyBooking.objects
+        .filter(hotel_name__icontains=name)
+        .filter(Q(departure_date__isnull=True) | Q(departure_date__gte=today))
         .values_list("id", flat=True)
     )
     if not fam_ids:
@@ -1203,19 +1264,17 @@ def pricing_quote_view(request):
 
         hotel_id_raw = request.GET.get("hotel_id")
         hotel_id = int(hotel_id_raw) if (hotel_id_raw and hotel_id_raw.isdigit()) else None
-        hotel_name = request.GET.get("hotel_name") or request.GET.get("hotel")  # ← НОВОЕ
+        hotel_name = request.GET.get("hotel_name") or request.GET.get("hotel")
         date = request.GET.get("date")
 
         if adults < 0 or children < 0 or infants < 0:
             return Response({"detail": "Negative quantities not allowed"}, status=400)
 
-        # Если hotel_id отсутствует — пробуем найти его по названию
+        # hotel_id по названию (если нужно)
         if not hotel_id and hotel_name:
             hid = _resolve_hotel_id_by_name(hotel_name)
             if hid:
                 hotel_id = hid
-
-        # Если до сих пор нет hotel_id — честно скажем об этом
         if not hotel_id:
             return Response({"detail": "hotel_id is required (could not resolve by hotel_name)"}, status=400)
 
@@ -1232,7 +1291,7 @@ def pricing_quote_view(request):
             avail_norm = []
             for x in avail_raw:
                 if isinstance(x, int):
-                    avail_norm.append(WEEKDAYS[x % 7])     # 0=mon..6=sun
+                    avail_norm.append(WEEKDAYS[x % 7])     # 0..6
                 else:
                     avail_norm.append(str(x).strip().lower()[:3])
             if avail_norm and wd not in avail_norm:
@@ -1241,26 +1300,62 @@ def pricing_quote_view(request):
                     "available_days": avail_norm
                 }, status=400)
 
-        # ВАЖНО: передаём date/ hotel_id дальше
-        quote = pricing_quote(
-            excursion_id=excursion_id,
-            adults=adults,
-            children=children,
-            infants=infants,
-            lang=lang,
-            hotel_id=hotel_id,
-            date=date,
-        )
-        return Response(quote)
+        # 1) Основной путь — через pricing_quote (по региону)
+        try:
+            quote = pricing_quote(
+                excursion_id=excursion_id,
+                adults=adults,
+                children=children,
+                infants=infants,
+                lang=lang,
+                hotel_id=hotel_id,
+                date=date,
+            )
+            return Response(quote)
+        except NotFoundError:
+            # 2) Фолбэк — посчитать из пикапа (как делает публичный сайт)
+            client = get_client()
 
-    except NotFoundError as e:
-        # аккуратно: это нормальная «нет цены»
-        return Response({"detail": str(e)}, status=404)
+            price_adult = price_child = Decimal("0")
+            pickup = None
+            # если есть дата — берём конкретный пикап на дату (самый первый)
+            try:
+                if date:
+                    picks = client.excursion_pickups(excursion_id=excursion_id, hotel_id=hotel_id, date=date) or []
+                    if picks:
+                        pickup = picks[0]
+                if not pickup:
+                    pickup = client.excursion_pickup(excursion_id, hotel_id) or {}
+            except Exception:
+                pickup = {}
+
+            if pickup:
+                try:
+                    price_adult = Decimal(str(pickup.get("price_adult") or "0"))
+                    price_child = Decimal(str(pickup.get("price_child") or "0"))
+                except Exception:
+                    price_adult = price_child = Decimal("0")
+
+            if price_adult > 0 or price_child > 0:
+                gross = (price_adult * Decimal(adults)) + (price_child * Decimal(children))
+                return Response({
+                    "excursion_id": excursion_id,
+                    "hotel_id": hotel_id,
+                    "date": date,
+                    "price_source": "PICKUP",            # ← помечаем источник
+                    "price_per_adult": str(price_adult),
+                    "price_per_child": str(price_child),
+                    "gross_total": str(gross.quantize(Decimal("0.01"))),
+                }, status=200)
+
+            return Response({"detail": "Price not available for given params (no region & no pickup price)"}, status=404)
+
     except (TypeError, ValueError) as e:
         return Response({"detail": str(e), "type": e.__class__.__name__}, status=400)
     except Exception as e:
         logging.getLogger(__name__).exception("pricing_quote_view failed")
         return Response({"detail": str(e), "type": e.__class__.__name__}, status=500)
+
 
 
 @api_view(["GET"])
@@ -1298,15 +1393,16 @@ class CompanyViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]  # <-- было IsAuthenticated
 
 
+@method_decorator(csrf_exempt, name="dispatch")
 class BookingCreateView(APIView):
-    permission_classes = [AllowAny]  # ← временно для теста
+    authentication_classes = []          # ← отключаем DRF SessionAuthentication (и его CSRF)
+    permission_classes = [AllowAny]      # как и было для dev
 
     def post(self, request):
         ser = BookingSaleCreateSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
         booking = ser.save()
         return Response({"id": booking.id, "booking_code": booking.booking_code}, status=status.HTTP_200_OK)
-
 
 class BookingListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1394,33 +1490,49 @@ class BookingDetailView(APIView):
         return Response(_booking_to_json(b), status=200)
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class BookingCancelView(APIView):
-    permission_classes = [AllowAny]
+    """
+    POST /api/sales/bookings/<pk>/cancel/
+    Требует активную сессию и валидный CSRF-токен.
+    Меняет статус брони на CANCELLED и отправляет письмо об аннуляции.
+    """
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [IsAuthenticated]
 
     @transaction.atomic
     def post(self, request, pk: int):
         b = get_object_or_404(BookingSale, pk=pk)
 
+        # DRAFT нельзя аннулировать — только удалять
         if b.status == "DRAFT":
             return Response({"detail": "Draft cannot be cancelled, delete it instead"}, status=409)
 
+        # Уже отменённые возвращаем как есть (идемпотентность)
         if b.status == "CANCELLED":
             return Response(_booking_to_json(b), status=200)
 
         reason = (request.data or {}).get("reason") or ""
 
-        # отправляем письмо (до изменения статуса; если письмо не ушло — всё равно продолжаем)
+        # Письмо об аннуляции (если не ушло — всё равно продолжаем)
         try:
             send_cancellation_email(b, reason)
         except Exception:
             pass
 
+        # Обновляем статус и время
         b.status = "CANCELLED"
         if hasattr(b, "cancelled_at"):
             b.cancelled_at = timezone.now()
         if hasattr(b, "cancel_reason"):
-            b.cancel_reason = reason or b.cancel_reason
-        b.save(update_fields=["status", *([ "cancelled_at" ] if hasattr(b, "cancelled_at") else []),
-                              *([ "cancel_reason" ] if hasattr(b, "cancel_reason") else [])])
+            b.cancel_reason = reason or getattr(b, "cancel_reason", "")
+
+        b.save(
+            update_fields=[
+                "status",
+                *(["cancelled_at"] if hasattr(b, "cancelled_at") else []),
+                *(["cancel_reason"] if hasattr(b, "cancel_reason") else []),
+            ]
+        )
 
         return Response(_booking_to_json(b), status=200)

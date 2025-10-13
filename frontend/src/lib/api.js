@@ -1,92 +1,151 @@
-export const BACKEND = import.meta.env.VITE_BACKEND || "http://127.0.0.1:8000";
+// frontend/src/lib/api.js
+import { getCookie } from './csrf.js';
+
+export const BACKEND    = import.meta.env.VITE_BACKEND    || "http://127.0.0.1:8000";
 export const SALES_BASE = import.meta.env.VITE_SALES_BASE || "/api/sales/";
 
-export const url = (p="") =>
-  `${BACKEND}${p.startsWith("/") ? p : "/"+p}`;
+// Хелперы URL (если где-то нужны прямые BASE URL)
+export const url = (p = "") =>
+  `${BACKEND}${p.startsWith("/") ? p : "/" + p}`;
 
-export const salesUrl = (p="") =>
+export const salesUrl = (p = "") =>
   `${BACKEND}${SALES_BASE.replace(/\/$/, "")}/${p.replace(/^\//, "")}`;
 
+const NEEDS_CSRF = /^(POST|PUT|PATCH|DELETE)$/i;
+
+function makeHeaders(extra = {}) {
+  const h = {
+    Accept: "application/json",
+    "X-Requested-With": "XMLHttpRequest",
+    ...extra,
+  };
+  // если уже лежит csrftoken — добавим проактивно
+  if (!("X-CSRFToken" in h)) {
+    const token = getCookie("csrftoken");
+    if (token) h["X-CSRFToken"] = token;
+  }
+  return h;
+}
+
+/**
+ * Универсальный fetch:
+ *  - credentials: 'include'
+ *  - автоподстановка X-CSRFToken для «опасных» методов
+ *  - авто-получение токена через /api/sales/csrf/ при его отсутствии
+ *  - один ретрай при 403 (вероятный CSRF)
+ */
+export async function jsonFetch(input, init = {}) {
+  let opts = { credentials: "include", ...init };
+  const method = (opts.method || "GET").toUpperCase();
+  opts.headers = makeHeaders(opts.headers || {});
+
+  // Если тело передали строкой (у нас это JSON.stringify), а Content-Type не указан — проставим
+  if (
+    opts.body != null &&
+    typeof opts.body === "string" &&
+    !("Content-Type" in opts.headers)
+  ) {
+    opts.headers["Content-Type"] = "application/json";
+  }
+
+  // Для мутирующих методов — гарантируем наличие CSRF
+  if (NEEDS_CSRF.test(method)) {
+    let token = getCookie("csrftoken");
+    if (!opts.headers["X-CSRFToken"]) {
+      opts.headers["X-CSRFToken"] = token || "";
+    }
+    // Токена нет — дернём эндпоинт и попробуем снова
+    if (!opts.headers["X-CSRFToken"]) {
+      await fetch("/api/sales/csrf/", { credentials: "include" });
+      token = getCookie("csrftoken");
+      opts.headers["X-CSRFToken"] = token || "";
+    }
+  }
+
+  let res;
+  try {
+    res = await fetch(input, opts);
+  } catch (e) {
+    throw new Error(String(e?.message || e) || "Network error");
+  }
+
+  // Если 403 и метод «опасный» — обновим токен и повторим один раз
+  if (res.status === 403 && NEEDS_CSRF.test(method)) {
+    try {
+      await fetch("/api/sales/csrf/", { credentials: "include" });
+      const token = getCookie("csrftoken");
+      opts.headers["X-CSRFToken"] = token || "";
+      res = await fetch(input, opts);
+    } catch (e) {
+      throw new Error("CSRF refresh failed: " + String(e?.message || e));
+    }
+  }
+
+  const ct = res.headers.get("content-type") || "";
+  const body = ct.includes("application/json")
+    ? await res.json().catch(() => null)
+    : await res.text().catch(() => "");
+
+  if (!res.ok) {
+    const detail =
+      (body && body.detail) ? body.detail :
+      (typeof body === "string" && body) || `${res.status} ${res.statusText}`;
+    throw new Error(String(detail));
+  }
+  return body;
+}
+
+// Вызывать один раз при старте приложения (чтобы сервер выдал csrftoken cookie)
+export async function initCsrf() {
+  try {
+    await fetch("/api/sales/csrf/", { credentials: "include" });
+  } catch {
+    // молча: не роняем приложение
+  }
+}
+
+// -------- API ФУНКЦИИ --------
 
 export async function previewBatch(familyId) {
-  const r = await fetch("/api/sales/bookings/batch/preview/", {
+  return jsonFetch("/api/sales/bookings/batch/preview/", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ family_id: Number(familyId) }),
   });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data?.detail || "Не удалось собрать предпросмотр");
-  return data; // { count, total, items: [...] }
 }
 
 export async function sendBatch(familyId) {
-  const r = await fetch("/api/sales/bookings/batch/send/", {
+  return jsonFetch("/api/sales/bookings/batch/send/", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ family_id: Number(familyId) }),
   });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data?.detail || "Ошибка отправки пакета");
-  return data; // { updated }
 }
 
 export async function getBooking(id) {
-  const r = await fetch(`/api/sales/bookings/${id}/`, { credentials: 'include' });
-  const j = await r.json();
-  if (!r.ok) throw new Error(j?.detail || `HTTP ${r.status}`);
-  return j;
+  return jsonFetch(`/api/sales/bookings/${id}/`, { method: "GET" });
 }
 
-export async function updateBooking(id, payload, { method = 'PATCH' } = {}) {
-  const r = await fetch(`/api/sales/bookings/${id}/`, {
+export async function updateBooking(id, payload, { method = "PATCH" } = {}) {
+  return jsonFetch(`/api/sales/bookings/${id}/`, {
     method,
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
     body: JSON.stringify(payload),
   });
-  const j = await r.json();
-  if (!r.ok) throw new Error(j?.detail || `HTTP ${r.status}`);
-  return j;
 }
 
-// удалить бронь (только DRAFT)
 export async function deleteBooking(id) {
-  const r = await fetch(`/api/sales/bookings/${id}/`, {
-    method: 'DELETE',
-    credentials: 'include',
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    throw new Error(j?.detail || `HTTP ${r.status}`);
-  }
+  await jsonFetch(`/api/sales/bookings/${id}/`, { method: "DELETE" });
   return true;
 }
 
-// аннулировать бронь (не DRAFT)
-export async function cancelBooking(id, reason = '') {
-  const r = await fetch(`/api/sales/bookings/${id}/cancel/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
+export async function cancelBooking(id, reason = "") {
+  return jsonFetch(`/api/sales/bookings/${id}/cancel/`, {
+    method: "POST",
     body: JSON.stringify({ reason }),
   });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    throw new Error(j?.detail || `HTTP ${r.status}`);
-  }
-  return j; // возвращаем объект брони
 }
 
 export async function patchTraveler(id, payload) {
-  const r = await fetch(`/api/sales/travelers/${id}/`, {
-    method: 'PATCH',
-    headers: { 'Content-Type':'application/json' },
-    credentials: 'include',
+  return jsonFetch(`/api/sales/travelers/${id}/`, {
+    method: "PATCH",
     body: JSON.stringify(payload),
   });
-  const text = await r.text();
-  const j = text ? JSON.parse(text) : null;
-  if (!r.ok) throw new Error(j?.detail || `HTTP ${r.status}`);
-  return j;
 }
-

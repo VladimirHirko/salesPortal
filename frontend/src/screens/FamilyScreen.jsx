@@ -3,30 +3,24 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { DayPicker } from 'react-day-picker';
 import Modal from '../components/Modal.jsx';
-import { previewBatch, sendBatch } from '../lib/api.js';
 import SpecialTravelerFields from '../components/SpecialTravelerFields.jsx';
-import { patchTraveler } from '../lib/api.js';
+
+// ⚠️ используем API-хелперы — они сами ставят X-CSRFToken и делают ретрай
+import {
+  previewBatch,
+  sendBatch,
+  patchTraveler,
+  cancelBooking,         // ← добавлено
+  jsonFetch,             // ← для batch cancel
+} from '../lib/api.js';
 
 // ===== helpers: дни недели / даты ============================================
 const WEEKDAY_CODE_TO_NUM = { mon:1, tue:2, wed:3, thu:4, fri:5, sat:6, sun:0 };
 
-// function onTravelerExtraChange(id, field, value) {
-//   // оптимистично обновим fam.party в памяти
-//   setFam(f => {
-//     if (!f) return f;
-//     const party = Array.isArray(f.party) ? f.party : [];
-//     return { ...f, party: party.map(t => t.id === id ? { ...t, [field]: value } : t) };
-//   });
-//   // и сохраним на бэке (PATCH /api/sales/travelers/:id/)
-//   patchTraveler(id, { [field]: value }).catch(() => {});
-// }
-
-
 function toWeekdayNums(ex) {
   if (!ex) return [];
   if (Array.isArray(ex.available_days) && ex.available_days.length) {
-    // пришли числа 0..6 (Mon..Sun) — сдвигаем к JS (Sun=0)
-    return ex.available_days.map(n => (Number(n) + 1) % 7);
+    return ex.available_days.map(n => (Number(n) + 1) % 7); // Mon(1)..Sun(0)
   }
   if (Array.isArray(ex.days) && ex.days.length) {
     return ex.days.map(c => WEEKDAY_CODE_TO_NUM[c]).filter(n => n !== undefined);
@@ -52,12 +46,11 @@ function buildNextDates(weekdayNums, daysAhead = 60) {
 }
 
 // ===== helpers: цены / форматирование ========================================
-function normalizeQuote(raw, { adults = 0, children = 0, infants = 0 } = {}) {
+function normalizeQuote(raw, { adults = 0, children = 0 } = {}) {
   if (!raw || typeof raw !== 'object') return { ok: false };
   if (raw.detail) return { ok: false, error: String(raw.detail) };
 
   const cur = raw.currency || 'EUR';
-
   let gross = raw.gross ?? raw.gross_total ?? raw.total;
   if (typeof gross === 'string') gross = Number(gross.replace(',', '.'));
 
@@ -76,7 +69,6 @@ function normalizeQuote(raw, { adults = 0, children = 0, infants = 0 } = {}) {
   }
 
   const grossNum = Number(gross ?? 0);
-
   return {
     ok: grossNum > 0 || perAdult != null || perChild != null,
     currency: cur,
@@ -85,12 +77,6 @@ function normalizeQuote(raw, { adults = 0, children = 0, infants = 0 } = {}) {
     perChild,
     source: raw.meta?.source || raw.source || null,
   };
-}
-
-function calcDraftsTotal(list) {
-  let sum = 0;
-  for (const b of list || []) sum += Number(b?.gross_total || 0);
-  return sum;
 }
 
 // Универсальный парсер форматов: [], {items:[...]}, {results:[...]}
@@ -102,7 +88,7 @@ function parseItemsPayload(json) {
   return [];
 }
 
-// ===== helpers: суммы по статусу =============================================
+// ===== helpers: суммы/форматирование =========================================
 const asNumber = v => parseFloat(String(v || 0).replace(',', '.')) || 0;
 
 function sumByStatuses(list, statuses) {
@@ -123,10 +109,7 @@ function extractTravelerIdsFromDraft(d) {
   if (!d) return [];
   if (Array.isArray(d.travelers)) return d.travelers.map(Number);
   if (typeof d.travelers_csv === 'string' && d.travelers_csv.trim()) {
-    return d.travelers_csv
-      .split(',')
-      .map(x => Number(x.trim()))
-      .filter(n => Number.isFinite(n));
+    return d.travelers_csv.split(',').map(x => Number(x.trim())).filter(Number.isFinite);
   }
   return [];
 }
@@ -159,42 +142,7 @@ function isSameBooking(draft, body) {
   return dA === bA && dC === bC && dI === bI;
 }
 
-function badge(text, kind) {
-  const cls =
-    kind === 'booked'   ? 'badge badge-success' :
-    kind === 'ready'    ? 'badge badge-info'    :
-    kind === 'cancelled'? 'badge badge-muted'   :
-                          'badge';
-  return <span className={cls} style={{ marginLeft: 8 }}>{text}</span>;
-}
-
-function computeDraftStatus(b) {
-  // пытаемся понять состояние по нескольким полям
-  const isCancelled  = String(b.ui_state) === 'cancelled' || b.cancelled || b.cancelled_at;
-  const isConfirmed  = String(b.ui_state) === 'booked' || b.confirmed || b.confirmed_at;
-  const isSent       = b.sent || b.sent_at || String(b.ui_state) === 'sent' || String(b.status) === 'SENT';
-  const isSendable   = b.is_sendable === true; // бэк уже отдаёт это поле
-  const isDraft      = String(b.ui_state) === 'draft' || String(b.status) === 'DRAFT';
-
-  if (isCancelled) return { kind: 'cancelled', label: 'Отменено' };
-  if (isConfirmed) return { kind: 'booked',    label: 'Подтверждено' };
-  if (isSent)      return { kind: 'pending',   label: 'Отправлено' }; // ждём подтверждения
-  if (isSendable)  return { kind: 'ready',     label: 'Готово к отправке' };
-  if (isDraft)     return { kind: 'draft',     label: 'Черновик' };
-  return { kind: 'draft',                       label: 'Черновик' };
-}
-
-function statusBadge(status){
-  const cls =
-    status.kind === 'booked'    ? 'badge badge-success' :
-    status.kind === 'ready'     ? 'badge badge-info'    :
-    status.kind === 'pending'   ? 'badge badge-warning' :
-    status.kind === 'cancelled' ? 'badge badge-muted'   :
-                                  'badge';
-  return <span className={cls} style={{ marginLeft: 8 }}>{status.label}</span>;
-}
-
-/* ↓↓↓ ВСТАВИТЬ СЮДА ↓↓↓ */
+/* спец-экскурсии + правила кнопок */
 function detectSpecialKey(title='') {
   const s = String(title).toLowerCase();
   if (s.includes('танжер') || s.includes('tang')) return 'tangier';
@@ -209,15 +157,11 @@ const canCancel = b => {
   return s !== 'DRAFT' && s !== 'CANCELLED';
 };
 const canSend = b => (b.is_sendable === true) || ((b.status||b.ui_state) === 'DRAFT');
-/* ↑↑↑ ВСТАВИТЬ СЮДА ↑↑↑ */
-
 
 // ===== компонент ==============================================================
 export default function FamilyScreen() {
-  // поддерживаем разные имена параметров маршрута: /family/:id, /family/:famId, ...
   const params = useParams();
-  const familyId =
-    params.id ?? params.famId ?? params.familyID ?? params.familyId;
+  const familyId = params.id ?? params.famId ?? params.familyID ?? params.familyId;
   const nav = useNavigate();
 
   // данные
@@ -232,11 +176,13 @@ export default function FamilyScreen() {
   const [excursionLanguage, setExcursionLanguage] = useState(''); // 'ru'|'en'|...
   const [excursionId, setExcursionId] = useState('');
   const [date, setDate] = useState('');
-    const selectedExcursion = useMemo(
+
+  const selectedExcursion = useMemo(
     () => excursions.find(x => String(x.id) === String(excursionId)) || null,
     [excursions, excursionId]
   );
-  const selectedExcursionTitle = selectedExcursion?.title || selectedExcursion?.localized_title || '';
+  const selectedExcursionTitle =
+    selectedExcursion?.title || selectedExcursion?.localized_title || '';
 
   // производные
   const [availableDates, setAvailableDates] = useState([]);
@@ -249,7 +195,7 @@ export default function FamilyScreen() {
   // черновики
   const [drafts, setDrafts] = useState([]);
 
-  // суммы для футера
+  // суммы
   const totalActive = useMemo(
     () => sumByStatuses(drafts, new Set(['DRAFT','PENDING','HOLD','PAID','CONFIRMED'])),
     [drafts]
@@ -270,71 +216,46 @@ export default function FamilyScreen() {
   const [previewData, setPreviewData] = useState(null);
   const [sending, setSending] = useState(false);
   const [editMode, setEditMode] = useState(false);
-  const [selectedIds, setSelectedIds] = useState([]); // id черновиков, выбранных для отправки/удаления
+  const [selectedIds, setSelectedIds] = useState([]); // id черновиков
 
-    // локальный обработчик для спец-полей (гендер/тип док-та/даты и т.п.)
-    function onTravelerExtraChange(id, field, value) {
-      // нормализация кодов под Django choices
-      let v = value;
-      if (field === 'gender') {
-        const s = String(value || '').trim().toUpperCase().replace('.', '');
-        v = (s === 'M' || s === 'MALE' || s === 'М' || s === 'МУЖ' || s === 'MR') ? 'M'
-          : (s === 'F' || s === 'FEMALE' || s === 'Ж' || s === 'ЖЕН' || ['MRS','MS','MISS'].includes(s)) ? 'F'
-          : '';
-      }
-      if (field === 'doc_type') {
-        const s = String(value || '').trim().toLowerCase().replace('.', '');
-        v = (['passport','pass','паспорт','загранпаспорт'].includes(s)) ? 'passport'
-          : (['dni','id','id card','ид','удостоверение','нацпаспорт'].includes(s)) ? 'dni'
-          : '';
-      }
-      // оптимистично обновляем локальный state семьи
-      setFam(f => {
-        if (!f) return f;
-        const party = Array.isArray(f.party) ? f.party : [];
-        return { ...f, party: party.map(t => t.id === id ? { ...t, [field]: v } : t) };
-      });
-      // отправляем на бэк
-      patchTraveler(id, { [field]: v }).catch(err => {
-        // при ошибке можно откатить локально или показать тост
-        console.error('patchTraveler failed', err);
-      });
-    }
-
-  
   // ===== загрузка семьи, экскурсий, компаний =================================
   useEffect(() => {
     if (!familyId) {
       setPageError('В URL отсутствует идентификатор семьи.');
       return;
     }
+    let ignore = false;
+
     (async () => {
       try {
         // семья
         const fRes = await fetch(`/api/sales/families/${familyId}/`, { credentials: 'include' });
         const f = await fRes.json().catch(() => null);
-        if (!fRes.ok || !f) {
-          setPageError(`Не удалось загрузить семью #${familyId}: ${f?.detail || fRes.status}`);
-          return;
-        }
+        if (!fRes.ok || !f) throw new Error(f?.detail || `HTTP ${fRes.status}`);
+        if (ignore) return;
         setFam(f);
         setSel(Array.isArray(f.party) ? f.party.map(p => p.id) : []);
+      } catch (e) {
+        if (!ignore) setPageError(`Не удалось загрузить семью #${familyId}: ${e?.message || e}`);
+        return;
+      }
 
-        // экскурсии
+      // экскурсии
+      try {
         const exRes = await fetch(`/api/sales/excursions/?compact=1&limit=20`, { credentials: 'include' });
         const exJson = exRes.ok ? await exRes.json() : null;
-        setExcursions(Array.isArray(exJson?.items) ? exJson.items : []);
+        if (!ignore) setExcursions(Array.isArray(exJson?.items) ? exJson.items : []);
+      } catch { if (!ignore) setExcursions([]); }
 
-        // компании
-        try {
-          const cRes = await fetch(`/api/sales/companies/`, { credentials: 'include' });
-          const cJson = cRes.ok ? await cRes.json() : [];
-          setCompanies(Array.isArray(cJson) ? cJson : []);
-        } catch { setCompanies([]); }
-      } catch (e) {
-        setPageError(`Ошибка сети: ${e?.message || e}`);
-      }
+      // компании
+      try {
+        const cRes = await fetch(`/api/sales/companies/`, { credentials: 'include' });
+        const cJson = cRes.ok ? await cRes.json() : [];
+        if (!ignore) setCompanies(Array.isArray(cJson) ? cJson : []);
+      } catch { if (!ignore) setCompanies([]); }
     })();
+
+    return () => { ignore = true; };
   }, [familyId]);
 
   // перечитать брони по семье (все статусы) + безопасный фолбэк на preview
@@ -343,7 +264,6 @@ export default function FamilyScreen() {
     let aborted = false;
 
     (async () => {
-      // 1) основной запрос
       try {
         const url = `/api/sales/bookings/family/${familyId}/drafts/?_=${Date.now()}`;
         const r = await fetch(url, { cache: 'no-store', credentials: 'include' });
@@ -352,30 +272,18 @@ export default function FamilyScreen() {
 
         if (r.ok) {
           let json = [];
-          try { json = text ? JSON.parse(text) : []; } catch (e) {
-            console.error('family bookings JSON parse error', e, text);
-            json = [];
-          }
-          const items = parseItemsPayload(json); // понимает [], {items:[]}, {results:[]}
-          if (items.length) {
-            setDrafts(items);
-            return; // успех — выходим
-          }
-        } else {
-          console.error('family bookings fetch failed', r.status, text);
+          try { json = text ? JSON.parse(text) : []; } catch { json = []; }
+          const items = parseItemsPayload(json);
+          if (aborted) return;
+          if (items.length) { setDrafts(items); return; }
         }
-      } catch (e) {
-        console.error('family bookings fetch exception', e);
-      }
+      } catch { /* ignore */ }
 
-      // 2) фолбэк: подтянем хотя бы предпросмотр, чтобы карточки не пустели
       try {
         const prev = await previewBatch(familyId);
         const items = Array.isArray(prev?.items) ? prev.items : [];
         if (!aborted) setDrafts(items);
-      } catch (e) {
-        if (!aborted) setDrafts([]);
-      }
+      } catch { if (!aborted) setDrafts([]); }
     })();
 
     return () => { aborted = true; };
@@ -419,7 +327,7 @@ export default function FamilyScreen() {
     (async () => {
       setQuoteLoading(true);
       try {
-        // 1) pickups v2
+        // pickups v2
         const p = new URLSearchParams({
           excursion_id: String(excursionId),
           hotel_id: String(fam.hotel_id || ''),
@@ -433,7 +341,7 @@ export default function FamilyScreen() {
         if (ctrl.signal.aborted) return;
         setPickup(pick);
 
-        // 2) pricing quote
+        // pricing quote
         const qp = new URLSearchParams({
           excursion_id: String(excursionId),
           adults: String(adults),
@@ -463,9 +371,40 @@ export default function FamilyScreen() {
   const id2name = useMemo(() => {
     const map = {};
     const party = Array.isArray(fam?.party) ? fam.party : [];
-    for (const p of party) map[p.id] = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ');
+    for (const p of party) {
+      const full = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ');
+      map[p.id] = full || `#${p.id}`;
+    }
     return map;
   }, [fam]);
+
+  // ===== обработчик доп. полей у туристов ====================================
+  function onTravelerExtraChange(id, field, value) {
+    // нормализация под Django choices
+    let v = value;
+    if (field === 'gender') {
+      const s = String(value || '').trim().toUpperCase().replace('.', '');
+      v = (s === 'M' || s === 'MALE' || s === 'М' || s === 'МУЖ' || s === 'MR') ? 'M'
+        : (s === 'F' || s === 'FEMALE' || s === 'Ж' || s === 'ЖЕН' || ['MRS','MS','MISS'].includes(s)) ? 'F'
+        : '';
+    }
+    if (field === 'doc_type') {
+      const s = String(value || '').trim().toLowerCase().replace('.', '');
+      v = (['passport','pass','паспорт','загранпаспорт'].includes(s)) ? 'passport'
+        : (['dni','id','id card','ид','удостоверение','нацпаспорт'].includes(s)) ? 'dni'
+        : '';
+    }
+    // оптимистично обновляем локально
+    setFam(f => {
+      if (!f) return f;
+      const party = Array.isArray(f.party) ? f.party : [];
+      return { ...f, party: party.map(t => t.id === id ? { ...t, [field]: v } : t) };
+    });
+    // сохраняем на бэке (через API-хелпер)
+    patchTraveler(id, { [field]: v }).catch(err => {
+      console.error('patchTraveler failed', err);
+    });
+  }
 
   // ===== бронирование ==========================================================
   const submitBooking = async () => {
@@ -502,7 +441,6 @@ export default function FamilyScreen() {
       commission: 0,
     };
 
-    // локальная дедупликация
     if ((drafts || []).some(d => isSameBooking(d, body))) {
       alert('Похоже, такая бронь уже есть в списке черновиков. Дубликаты не допускаются.');
       return;
@@ -527,7 +465,7 @@ export default function FamilyScreen() {
         setDrafts(Array.isArray(j2) ? j2 : j2.items || []);
       }
 
-      // сброс формы (оставляем компанию/комнату/состав)
+      // сброс формы
       setExcursionId('');
       setAvailableDates([]);
       setDate('');
@@ -549,11 +487,9 @@ export default function FamilyScreen() {
     setPreviewLoading(true);
     try {
       const data = await previewBatch(familyId);
-      setPreviewData(data); // { count, total, items: [...] }
+      setPreviewData(data);
       setEditMode(false);
-      const ids = Array.isArray(data?.items) ? data.items.map(it => it.id).filter(Boolean) : [];
       const items = Array.isArray(data?.items) ? data.items : [];
-      // по умолчанию выделяем только те, что можно отправить
       setSelectedIds(items.filter(canSend).map(it => it.id).filter(Boolean));
     } catch (e) {
       setPreviewData(null);
@@ -565,11 +501,7 @@ export default function FamilyScreen() {
 
   async function sendBatchNow() {
     const items = Array.isArray(previewData?.items) ? previewData.items : [];
-    const idsToSend = (
-      editMode
-        ? selectedIds
-        : items.filter(canSend).map(x => x.id)
-    ).filter(Boolean);
+    const idsToSend = (editMode ? selectedIds : items.filter(canSend).map(x => x.id)).filter(Boolean);
 
     if (!idsToSend.length) {
       setPreviewError('Нет строк для отправки');
@@ -579,17 +511,13 @@ export default function FamilyScreen() {
     setSending(true);
     setPreviewError('');
     try {
-      // Явный вызов bulk-send по id (если у тебя helper sendBatch делает familyId — оставь, но этот способ точнее)
-      const r = await fetch('/api/sales/bookings/batch/send/', {
+      // можно и через ваш sendBatch(familyId), но тут — явные ids
+      await jsonFetch('/api/sales/bookings/batch/send/', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ booking_ids: idsToSend })
+        body: JSON.stringify({ booking_ids: idsToSend }),
       });
-      const res = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(res?.detail || `HTTP ${r.status}`);
 
-      // перечитать черновики для обновления бейджей
+      // перечитать черновики
       const r2 = await fetch(`/api/sales/bookings/family/${familyId}/drafts/`, { credentials: 'include' });
       const j2 = r2.ok ? await r2.json() : [];
       setDrafts(Array.isArray(j2) ? j2 : (j2.items || []));
@@ -604,7 +532,6 @@ export default function FamilyScreen() {
   function toggleRow(id) {
     setSelectedIds(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]);
   }
-
   function toggleAll() {
     const all = (previewData?.items || []).map(it => it.id).filter(Boolean);
     setSelectedIds(ids => ids.length === all.length ? [] : all);
@@ -615,39 +542,27 @@ export default function FamilyScreen() {
     if (!confirm(`Удалить ${selectedIds.length} черновик(ов)?`)) return;
 
     try {
-      // удаляем только те, что правда можно удалять
       const ids = selectedIds.slice();
       await Promise.all(ids.map(id =>
         fetch(`/api/sales/bookings/${id}/`, { method: 'DELETE', credentials: 'include' })
       ));
 
-      // ОБЯЗАТЕЛЬНО: перечитать драфты и превью вместе
       await Promise.all([
         fetch(`/api/sales/bookings/family/${familyId}/drafts/`, { credentials:'include' })
           .then(r=>r.json()).then(j=> setDrafts(Array.isArray(j)? j : (j.items||[]))),
-        loadPreview() // перезагрузит модалку и суммы
+        loadPreview()
       ]);
     } catch (e) {
       setPreviewError(e.message || 'Не удалось удалить выбранные черновики');
     }
   }
 
+  // ←––––––––– ИСПРАВЛЕНО: используем cancelBooking/jsonFetch (CSRF ок) ––––––––→
   async function cancelOne(id) {
-    // можно спросить причину
     const reason = window.prompt('Причина аннуляции (необязательно):', '');
-    if (reason === null) return; // пользователь передумал
-
+    if (reason === null) return;
     try {
-      const resp = await fetch(`/api/sales/bookings/${id}/cancel/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ reason })
-      });
-      const j = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(j?.detail || `HTTP ${resp.status}`);
-
-      // перечитаем список, чтобы карточка тут же посерела как "Отменено"
+      await cancelBooking(id, reason); // ← всегда с токеном
       const r2 = await fetch(`/api/sales/bookings/family/${familyId}/drafts/?_=${Date.now()}`, {
         credentials: 'include'
       });
@@ -658,14 +573,11 @@ export default function FamilyScreen() {
     }
   }
 
-
   async function handleCancelSelected() {
     if (!selectedIds.length) return;
 
-    // отфильтруем только те, что правда можно аннулировать
     const items = Array.isArray(previewData?.items) ? previewData.items : [];
-    const ids = items.filter(it => selectedIds.includes(it.id) && canCancel(it))
-                     .map(it => it.id);
+    const ids = items.filter(it => selectedIds.includes(it.id) && canCancel(it)).map(it => it.id);
 
     if (!ids.length) {
       setPreviewError('Нет строк, доступных для аннуляции.');
@@ -674,31 +586,21 @@ export default function FamilyScreen() {
     if (!confirm(`Аннулировать ${ids.length} бронирование(я)?`)) return;
 
     try {
-      // предполагаемый batch-эндпоинт аннуляции
-      const resp = await fetch('/api/sales/bookings/batch/cancel/', {
+      await jsonFetch('/api/sales/bookings/batch/cancel/', {
         method:'POST',
-        headers:{'Content-Type':'application/json'},
-        credentials:'include',
-        body: JSON.stringify({ booking_ids: ids })
+        body: JSON.stringify({ booking_ids: ids }),
       });
-      const j = await resp.json().catch(()=> ({}));
-      if (!resp.ok) throw new Error(j?.detail || `HTTP ${resp.status}`);
-
-      // ОБЯЗАТЕЛЬНО: перечитать драфты и превью вместе
       await Promise.all([
         fetch(`/api/sales/bookings/family/${familyId}/drafts/`, { credentials:'include' })
           .then(r=>r.json()).then(j=> setDrafts(Array.isArray(j)? j : (j.items||[]))),
-        loadPreview() // перезагрузит модалку и суммы
+        loadPreview()
       ]);
     } catch (e) {
-      setPreviewError(e.message || 'Не удалось удалить выбранные черновики');
+      setPreviewError(e.message || 'Не удалось аннулировать выбранные брони');
     }
   }
 
-  function handleEdit(id) {
-    // навигация на страницу редактирования (сделай такой маршрут, если его ещё нет)
-    nav(`/bookings/${id}/edit`);
-  }
+  function handleEdit(id) { nav(`/bookings/${id}/edit`); }
 
   // ===== рендер ===============================================================
   if (pageError) return <div style={{padding:16, color:'#b91c1c'}}>{pageError}</div>;
@@ -789,7 +691,7 @@ export default function FamilyScreen() {
         </div>
       </div>
 
-      {/* Доп. поля для специальных экскурсий (для каждого выбранного туриста) */}
+      {/* Доп. поля для спец-экскурсий */}
       {detectSpecialKey(selectedExcursionTitle) !== 'regular' && (
         <div className="section">
           <div className="section__head">Дополнительные данные для спец-экскурсии</div>
@@ -879,7 +781,7 @@ export default function FamilyScreen() {
         </div>
       </div>
 
-      {/* Точка сбора (плашка) */}
+      {/* Точка сбора */}
       {pickup?.results?.length > 0 && (() => {
         const p0 = pickup.results[0] || {};
         const mapHref =
@@ -911,7 +813,7 @@ export default function FamilyScreen() {
               if (quoteLoading) return <div className="muted">Пожалуйста, подождите…</div>;
               const adults   = (fam?.party || []).filter(p => !p.is_child && sel.includes(p.id)).length || 0;
               const children = (fam?.party || []).filter(p =>  p.is_child && sel.includes(p.id)).length || 0;
-              const qn = normalizeQuote(quote, { adults, children, infants: 0 });
+              const qn = normalizeQuote(quote, { adults, children });
               if (!qn.ok) {
                 return (
                   <div className="muted">
@@ -952,12 +854,11 @@ export default function FamilyScreen() {
         {bookingLoading ? 'Бронирую…' : 'Забронировать'}
       </button>
 
-      {/* Черновики + предпросмотр (кнопка доступна всегда, даже при 0 черновиков) */}
+      {/* Черновики + предпросмотр */}
       {Array.isArray(drafts) && (
         <div className="section" style={{ marginTop: 16 }}>
           <div className="section__head">Черновики для этой семьи</div>
 
-          {/* Легенда статусов */}
           <div className="muted" style={{ marginBottom: 8 }}>
             <span className="badge badge-info">Готово к отправке</span>
             <span className="badge badge-warning" style={{ marginLeft: 8 }}>Отправлено</span>
@@ -966,9 +867,7 @@ export default function FamilyScreen() {
           </div>
 
           <div className="section__body drafts">
-            {drafts.length === 0 && (
-              <div className="muted">Черновиков пока нет.</div>
-            )}
+            {drafts.length === 0 && <div className="muted">Черновиков пока нет.</div>}
 
             {drafts.map(b => {
               const travNames =
@@ -976,13 +875,13 @@ export default function FamilyScreen() {
                   ? b.travelers_names
                   : namesByIds(extractTravelerIdsFromDraft(b), id2name);
 
-              const st = b.status || b.ui_state; // берём статус (если с бэка приходит status)
+              const st = b.status || b.ui_state;
 
               return (
                 <div key={b.id} className="draft">
                   <div className="draft__row">
                     <div className="draft__title">
-                      {(b.excursion_title_bi || b.excursion_title_es && `${b.excursion_title} (${b.excursion_title_es})` || b.excursion_title || `Экскурсия #${b.excursion_id}`)}
+                      {(b.excursion_title_bi || (b.excursion_title_es && `${b.excursion_title} (${b.excursion_title_es})`) || b.excursion_title || `Экскурсия #${b.excursion_id}`)}
                       {st === "DRAFT"     && <span className="badge badge-info"     style={{ marginLeft: 8 }}>Готово к отправке</span>}
                       {st === "PENDING"   && <span className="badge badge-warning"  style={{ marginLeft: 8 }}>Отправлено</span>}
                       {st === "CONFIRMED" && <span className="badge badge-success"  style={{ marginLeft: 8 }}>Подтверждено</span>}
@@ -1008,7 +907,6 @@ export default function FamilyScreen() {
 
                   <div className="draft__sum">{fmtMoney(b.gross_total || 0, 'EUR')}</div>
                   <div className="draft__actions" style={{ marginTop: 6, display: 'flex', gap: 6 }}>
-                    {/* Аннулировать можно всё, что уже не DRAFT и ещё не CANCELLED */}
                     {canCancel(b) && (
                       <button
                         className="btn btn-xs btn-warning"
@@ -1018,14 +916,12 @@ export default function FamilyScreen() {
                         Аннулировать
                       </button>
                     )}
-                    {/* (опционально) удалить доступно только для DRAFT */}
                     {canDelete(b) && (
                       <button
                         className="btn btn-xs btn-outline"
                         onClick={async () => {
                           if (!confirm('Удалить черновик?')) return;
                           await fetch(`/api/sales/bookings/${b.id}/`, { method: 'DELETE', credentials: 'include' });
-                          // обновим ленту
                           const r2 = await fetch(`/api/sales/bookings/family/${familyId}/drafts/?_=${Date.now()}`, { credentials: 'include' });
                           const j2 = r2.ok ? await r2.json() : [];
                           setDrafts(Array.isArray(j2) ? j2 : (j2.items || []));
@@ -1036,7 +932,6 @@ export default function FamilyScreen() {
                       </button>
                     )}
                   </div>
-
                 </div>
               );
             })}
@@ -1146,7 +1041,6 @@ export default function FamilyScreen() {
                           )}
                         </td>
                       )}
-
                     </tr>
                   ))}
                 </tbody>
@@ -1184,7 +1078,6 @@ export default function FamilyScreen() {
                 </div>
               );
             })()}
-
           </>
         )}
 
@@ -1205,13 +1098,11 @@ export default function FamilyScreen() {
                   : (previewData.items || []).filter(canSend).length === 0
               )
             }
-
           >
             {sending ? 'Отправляем…' : 'Отправить в офис'}
           </button>
         </div>
       </Modal>
-
     </div>
   );
 }

@@ -25,27 +25,59 @@ def _normalize_region_obj(raw: dict | None) -> dict | None:
     rslug = raw.get("slug") or raw.get("code") or raw.get("name")
     return {"id": rid, "slug": rslug} if (rid or rslug) else None
 
-def _hotel_region(hotel_id: int) -> dict | None:
-    data = _get(f"/hotels/{hotel_id}/", allow_404=True)
-    if not data:
+# --- Region resolver that survives broken /hotels/<id>/ ----------------------
+def _hotel_region(hotel_id: int) -> str | None:
+    """
+    Возвращает регион (slug) по hotel_id.
+    Алгоритм:
+      1) /api/hotels/<id>/ → region или region_slug
+      2) fallback: /api/hotels/?search=<hotel_name_from_id_or_guess>
+         либо просто /api/hotels/?search=<hotel_id> и берём item с совпадающим id
+    """
+    if not hotel_id:
         return None
-    # 1) вложенный объект region
-    r = data.get("region")
-    norm = _normalize_region_obj(r) if isinstance(r, dict) else None
-    if norm:
-        return norm
-    # 2) плоское поле region_id
-    rid = data.get("region_id")
-    if rid is not None:
-        return {"id": rid, "slug": None}
-    # 3) иногда по другому называется
-    for key in ("area", "zone", "resort"):
-        r2 = data.get(key)
-        if isinstance(r2, dict):
-            norm = _normalize_region_obj(r2)
-            if norm:
-                return norm
+
+    # 1) прямой запрос
+    data = _get(f"/hotels/{int(hotel_id)}/", allow_404=True)
+    if isinstance(data, dict) and data:
+        reg = (data.get("region") or data.get("region_slug") or "").strip()
+        if reg:
+            return reg
+
+    # 2) фолбэк через поиск: пробуем найти карточку именно с таким id
+    try:
+        items = search_hotels(str(hotel_id), limit=25)
+        items = items if isinstance(items, list) else (items.get("items") or [])
+        for it in items:
+            try:
+                if int(it.get("id") or 0) == int(hotel_id):
+                    reg = (it.get("region") or it.get("region_slug") or "").strip()
+                    if reg:
+                        return reg
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 3) ещё одна «мягкая» попытка: поиск по названию, если удастся его вытащить
+    #    (иногда /hotels/<id>/ отдаёт только имя)
+    try:
+        name = ""
+        if isinstance(data, dict):
+            name = (data.get("name") or data.get("title") or "").strip()
+        if name:
+            items = search_hotels(name, limit=10)
+            items = items if isinstance(items, list) else (items.get("items") or [])
+            for it in items:
+                if str(it.get("name") or it.get("title") or "").strip().lower() == name.lower():
+                    reg = (it.get("region") or it.get("region_slug") or "").strip()
+                    if reg:
+                        return reg
+    except Exception:
+        pass
+
     return None
+
 
 def _pick_first(*values):
     for v in values:

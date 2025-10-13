@@ -1,9 +1,7 @@
-# backend/sales/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-
 from . import views_api as v
-from .views_pages import tourists_import_page   # ← добавили
+from .views_pages import tourists_import_page
 from .views_api import (
     CompanyViewSet,
     FamilyBookingDraftsView,
@@ -12,7 +10,6 @@ from .views_api import (
     BookingCreateView,
     FamilyDetailView,
     TravelerPartialUpdateView,
-    # … остальные вьюхи, которые уже были подключены
 )
 
 router = DefaultRouter()
@@ -24,11 +21,14 @@ urlpatterns = [
     # Health
     path("health/", v.health, name="health"),
 
+    # CSRF + Login (оба нужны фронту)
+    path("csrf/", v.csrf_view, name="csrf"),           # GET → csrftoken
+    path("login/", v.login_view, name="login"),        # POST → sessionid
+
     # HTML-страницы
-    path("import/tourists/", tourists_import_page, name="tourists_import_page"),  # ← используем прямую функцию
+    path("import/tourists/", tourists_import_page, name="tourists_import_page"),
 
     # Публичные API
-    path("login/", v.login_view, name="login"),
     path("hotels/", v.hotels, name="hotels"),
     path("tourists/", v.tourists, name="tourists"),
     path("families/<int:fam_id>/", v.family_detail, name="family_detail"),
@@ -45,6 +45,7 @@ urlpatterns = [
 
     # Отладка
     path("debug/csi-base/", v.debug_csi_base, name="debug_csi_base"),
+    path("debug/pricing-sig/", v.debug_pricing_signature, name="debug_pricing_sig") if False else
     path("debug/pricing-sig/", v.pricing_debug_signature, name="debug_pricing_sig"),
     path("debug/hotel-region/", v.debug_hotel_region, name="debug_hotel_region"),
     path("debug/excursion-prices/", v.debug_excursion_prices, name="debug_excursion_prices"),
@@ -62,8 +63,7 @@ urlpatterns = [
     path("bookings/batch/send/", v.BookingBatchSendView.as_view(), name="bookings-batch-send"),
 
     # Бронирования — работа с отдельной бронью
-    path("bookings/<int:pk>/", v.BookingDetailView.as_view(), name="booking-detail"),  # GET/PUT/DELETE
-    path("bookings/<int:pk>/cancel/", v.BookingCancelView.as_view(), name="booking-cancel"),  # POST → аннуляция
-    path("bookings/batch/cancel/", v.BookingBatchCancelView.as_view(), name="bookings-batch-cancel"),  # POST {booking_ids:[...]}
-
+    path("bookings/<int:pk>/", v.BookingDetailView.as_view(), name="booking-detail"),
+    path("bookings/<int:pk>/cancel/", v.BookingCancelView.as_view(), name="booking-cancel"),
+    path("bookings/batch/cancel/", v.BookingBatchCancelView.as_view(), name="bookings-batch-cancel"),
 ]

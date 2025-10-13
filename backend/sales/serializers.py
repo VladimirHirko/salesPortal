@@ -185,21 +185,31 @@ class BookingSaleCreateSerializer(serializers.ModelSerializer):
 
     def _resolve_region_by_hotel(self, hotel_id: int) -> str | None:
         """
-        Запрашивает CostaSolinfo по hotel_id и возвращает region/region_slug.
-        Возвращает None при любой ошибке или отсутствии данных.
+        Возвращает slug региона по hotel_id.
+        1) Пытаемся через services.costasolinfo._hotel_region (умеет фолбэчиться через поиск).
+        2) Если вдруг там не нашли — старый прямой запрос /api/hotels/<id>/.
         """
         if not hotel_id:
             return None
-        # ленивые импорты, чтобы не ломать окружение при тестах
-        from django.conf import settings
-        import requests
 
-        base = getattr(settings, "CSI_API_BASE", None) or getattr(settings, "CSI", {}).get("BASE")
-        timeout = getattr(settings, "CSI_HTTP_TIMEOUT", 6.0)
-        token = getattr(settings, "CSI", {}).get("TOKEN", "") if hasattr(settings, "CSI") else ""
-        if not base:
-            return None
+        # 1) основной путь — наш хелпер
         try:
+            from .services.costasolinfo import _hotel_region
+            reg = _hotel_region(int(hotel_id))
+            if reg:
+                return reg
+        except Exception:
+            pass
+
+        # 2) фолбэк — прямой REST как было раньше
+        try:
+            from django.conf import settings
+            import requests
+            base = getattr(settings, "CSI_API_BASE", None) or getattr(settings, "CSI", {}).get("BASE")
+            if not base:
+                return None
+            timeout = getattr(settings, "CSI_HTTP_TIMEOUT", 6.0)
+            token = getattr(settings, "CSI", {}).get("TOKEN", "") if hasattr(settings, "CSI") else ""
             r = requests.get(
                 f"{str(base).rstrip('/')}/api/hotels/{int(hotel_id)}/",
                 headers={"Authorization": f"Bearer {token}"} if token else {},
@@ -212,6 +222,7 @@ class BookingSaleCreateSerializer(serializers.ModelSerializer):
             return region or None
         except Exception:
             return None
+
 
     @transaction.atomic  # важно, чтобы всё создавалось/падало единым блоком
     def create(self, validated_data):
@@ -429,11 +440,10 @@ class BookingSaleListSerializer(serializers.ModelSerializer):
                 if people:
                     out = []
                     for t in people:
-                        full = getattr(t, "full_name", None)
-                        if not full:
-                            fn = (getattr(t, "first_name", "") or "").strip()
-                            ln = (getattr(t, "last_name", "") or "").strip()
-                            full = (f"{fn} {ln}").strip()
+                        # у модели нет поля full_name — собираем сами
+                        fn = (getattr(t, "first_name", "") or "").strip()
+                        ln = (getattr(t, "last_name", "") or "").strip()
+                        full = (f"{ln} {fn}").strip()
                         if not full:
                             full = f"Traveler #{getattr(t, 'id', '')}".strip()
                         out.append(full)
@@ -455,21 +465,20 @@ class BookingSaleListSerializer(serializers.ModelSerializer):
         if not ids:
             return []
 
-        Traveler = apps.get_model("sales", "Traveler")
-        rows = Traveler.objects.filter(id__in=ids).values("id", "full_name", "first_name", "last_name")
+        # ВАЖНО: НЕ запрашиваем несуществующее поле full_name
+        rows = Traveler.objects.filter(id__in=ids).values("id", "first_name", "last_name")
         by_id = {}
         for r in rows:
-            name = (r.get("full_name") or "").strip()
-            if not name:
-                fn = (r.get("first_name") or "").strip()
-                ln = (r.get("last_name") or "").strip()
-                name = (f"{fn} {ln}").strip()
+            fn = (r.get("first_name") or "").strip()
+            ln = (r.get("last_name") or "").strip()
+            name = (f"{ln} {fn}").strip()
             if not name:
                 name = f"Traveler #{r['id']}"
             by_id[r["id"]] = name
 
         # сохранить порядок CSV и выкинуть пустые/отсутствующие
         return [by_id[i] for i in ids if by_id.get(i)]
+
 
 
 
