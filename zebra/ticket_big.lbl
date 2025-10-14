@@ -1,0 +1,31 @@
+! 0 200 200 800 1
+PW 576
+SPEED 3
+TONE 0
+
+CENTER
+SETBOLD 2
+TEXT 4 0 0 20 SalesPortal
+TEXT 4 0 0 70 GRANADA (RU)
+
+LEFT
+SETBOLD 0
+TEXT 3 0 20 130 Date: 20/10/2025      Lang: RU
+TEXT 3 0 20 170 Hotel: Marbella Playa
+TEXT 3 0 20 210 Pickup: 08:30 Reception
+TEXT 3 0 20 250 Adults: 2   Children: 1
+TEXT 3 0 20 290 Company: Tez Tour
+
+LINE 20 330 550 330 2
+
+TEXT 3 0 20 360 Booking code:
+TEXT 3 0 230 360 SP-000123
+
+BARCODE-TEXT 7 0 0
+BARCODE QR 200 400 M 2 U 6
+MA,SP-000123
+ENDQR
+
+TEXT 3 0 120 730 Show this ticket to the guide
+
+PRINT

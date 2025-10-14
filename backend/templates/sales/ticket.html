@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+/* ОДНА СТРАНИЦА НУЖНОЙ ВЫСОТЫ ПОД ЛЕНТУ 72 мм */
+@page { size: 72mm {{ page_h_mm }}mm; margin: 6mm; }
+
+/* Базовые сбросы + запрет разрывов страниц */
+html, body { margin: 0; padding: 0; }
+* {
+  break-inside: avoid;           /* современный */
+  page-break-inside: avoid;      /* старые движки */
+}
+.ticket, h1, .row, .guests, .guests .name, .qr2, .qrbox, .footer { 
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* БАЗА (укрупнено) */
+body  { font-family: "DejaVu Sans", sans-serif; font-size: 32px; line-height: 1.35; color: #000; }
+.ticket { width: 100%; border-top: 1px solid #999; padding-top: 6px; }
+
+/* ЛОГО */
+.logo { text-align: center; margin-bottom: 6px; }
+.logo img { max-width: 300px; max-height: 100px; object-fit: contain; }
+
+/* ЗАГОЛОВОК ЭКСКУРСИИ */
+h1 { font-size: 40px; font-weight: 700; text-align: center; margin: 0 0 6px; }
+
+/* Код бронирования */
+.booking {
+  text-align: center;
+  font-size: 30px;
+  font-weight: 800;
+  margin: 6px 0 4px;
+  letter-spacing: 0.5px;
+}
+.booking .code {
+  font-family: "DejaVu Sans Mono", "DejaVu Sans", monospace;
+}
+
+/* СТРОКИ */
+.row { margin-bottom: 4px; }
+.label { font-weight: 800; }
+.row, .label { word-break: break-word; }
+
+/* ГОСТИ — крупно и жирно */
+.hr { border-top: 1px solid #999; margin: 8px 0; }
+.guests { margin-top: 4px; }
+.guests .label { display: block; margin-bottom: 4px; font-size: 28px; }
+.guests .name {
+  display: block;
+  font-size: 30px;
+  font-weight: 800;
+  margin-bottom: 2px;
+}
+
+/* ДВА QR РЯДОМ */
+.qr2   { display: flex; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.qrbox { width: 48%; text-align: center; }
+.qrbox img { width: 250px; height: 250px; }  /* 203 dpi хватает для сканирования */
+.caption { font-size: 25px; margin-top: 2px; font-weight: 700; }
+.small   { font-size: 16px; color: #333; word-break: break-all; }
+
+/* НИЗ БИЛЕТА — крупнее подпись + благодарность */
+.footer {
+  text-align: center;
+  margin-top: 5px;
+  border-top: 1px dashed #aaa;
+  padding-top: 3px;
+}
+.footer .show   { font-size: 26px; font-weight: 800; margin-bottom: 4px; }
+.footer .thanks { font-size: 22px; font-style: italic; }
+</style>
+</head>
+<body>
+  <div class="ticket">
+    <!-- ЛОГОТИП -->
+    <div class="logo">
+      <img src="{{ logo_url }}" alt="CostaSolinfo">
+    </div>
+
+    <h1>{{ title_en }}</h1>
+
+    <div class="booking">
+      Booking No: <span class="code">{{ b.booking_code }}</span>
+    </div>
+
+    <div class="row"><span class="label">Date:</span> {{ date_en }}</div>
+    <div class="row"><span class="label">Language:</span> {{ b.excursion_language }}</div>
+    <div class="row"><span class="label">Company:</span> {{ b.company.name }}</div>
+    <div class="row"><span class="label">Hotel:</span> {{ b.hotel_name }}</div>
+    <div class="row"><span class="label">Pickup:</span> {{ b.pickup_time_str }}</div>
+    <div class="row">
+      <span class="label">Adults:</span> {{ b.adults }}
+      &nbsp; <span class="label">Children:</span> {{ b.children }}
+      &nbsp; <span class="label">Infants:</span> {{ b.infants|default:0 }}
+    </div>
+
+    {% if travelers and travelers|length > 0 %}
+      <div class="hr"></div>
+      <div class="row guests">
+        <span class="label">Guests:</span>
+        {% for full in travelers %}
+          <span class="name">{{ full }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <!-- ДВА QR: сайт и точка сбора -->
+    <div class="qr2">
+      <div class="qrbox">
+        <img src="{{ qr_site }}" alt="QR Website">
+        <div class="caption">Website</div>
+      </div>
+      <div class="qrbox">
+        <img src="{{ qr_maps }}" alt="QR Pickup">
+        <div class="caption">Pickup point</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="show">Show this ticket to the guide</div>
+      <div class="thanks">Thank you for choosing CostaSolinfo! Have a wonderful excursion.</div>
+    </div>
+  </div>
+</body>
+</html>

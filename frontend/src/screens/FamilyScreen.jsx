@@ -458,12 +458,32 @@ export default function FamilyScreen() {
       const data = text ? JSON.parse(text) : null;
       if (!res.ok) throw new Error(data?.detail || JSON.stringify(data));
 
-      // обновляем черновики
-      const r2 = await fetch(`/api/sales/bookings/family/${familyId}/drafts/`, { credentials: 'include' });
-      if (r2.ok) {
-        const j2 = await r2.json();
-        setDrafts(Array.isArray(j2) ? j2 : j2.items || []);
+      // попытка взять id из ответа API
+      let newId =
+        data?.id ??
+        data?.booking_id ??
+        data?.booking?.id ??
+        data?.result?.id ?? null;
+
+      // перечитать черновики и найти только что созданную бронь, если id не пришёл
+      let draftsList = [];
+      try {
+        const r2 = await fetch(`/api/sales/bookings/family/${familyId}/drafts/`, { credentials: 'include' });
+        if (r2.ok) {
+          const j2 = await r2.json();
+          draftsList = Array.isArray(j2) ? j2 : (j2.items || []);
+          setDrafts(draftsList);
+        }
+      } catch { /* ignore */ }
+
+      // если id неизвестен — ищем по совпадению полей (твоя isSameBooking)
+      if (!newId && draftsList.length) {
+        const found = draftsList.find(d => isSameBooking(d, body));
+        if (found?.id) newId = found.id;
       }
+
+      // 🖨️ печать PDF
+      openTicketAndPrint(newId);
 
       // сброс формы
       setExcursionId('');
@@ -529,6 +549,37 @@ export default function FamilyScreen() {
     }
   }
 
+  function openTicketAndPrint(id) {
+    if (!id) return;
+    const url = `/api/sales/bookings/${id}/ticket.pdf`;
+
+    // скрытый iframe: печать после загрузки
+    const iframe = document.createElement("iframe");
+    iframe.style.position = "fixed";
+    iframe.style.right = "0";
+    iframe.style.bottom = "0";
+    iframe.style.width = "0";
+    iframe.style.height = "0";
+    iframe.style.border = "0";
+    iframe.src = url;
+
+    iframe.onload = () => {
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      } catch (e) {
+        // запасной путь — отдельная вкладка
+        const w = window.open(url, "_blank");
+        if (!w) alert("Разрешите всплывающие окна для печати билета.");
+      } finally {
+        setTimeout(() => iframe.remove(), 1500);
+      }
+    };
+
+    document.body.appendChild(iframe);
+  }
+
+  
   function toggleRow(id) {
     setSelectedIds(ids => ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]);
   }
@@ -907,6 +958,15 @@ export default function FamilyScreen() {
 
                   <div className="draft__sum">{fmtMoney(b.gross_total || 0, 'EUR')}</div>
                   <div className="draft__actions" style={{ marginTop: 6, display: 'flex', gap: 6 }}>
+                    {/* ПЕЧАТЬ — доступна всегда */}
+                    <button
+                      className="btn btn-xs btn-primary"
+                      onClick={() => openTicketAndPrint(b.id)}
+                      title="Печать билета"
+                    >
+                      Печать
+                    </button>
+
                     {canCancel(b) && (
                       <button
                         className="btn btn-xs btn-warning"
@@ -916,6 +976,7 @@ export default function FamilyScreen() {
                         Аннулировать
                       </button>
                     )}
+
                     {canDelete(b) && (
                       <button
                         className="btn btn-xs btn-outline"
@@ -932,6 +993,7 @@ export default function FamilyScreen() {
                       </button>
                     )}
                   </div>
+
                 </div>
               );
             })}

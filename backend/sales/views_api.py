@@ -1,8 +1,56 @@
-# sales/views_api.py
+# backend/sales/views_api.py
+# --- TEMP PATCH: pydyf PDF ctor mismatch (WeasyPrint 61.x expects args) ---
+import re, html
+
+def pick_title_en(title: str, max_words: int = 3) -> str:
+    if not title:
+        return ""
+    # 1) сперва ищем английский сегмент после разделителей
+    parts = re.split(r"\s*[\/\|\-–—]\s*", title)
+    for part in parts:
+        words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", part)
+        if words:
+            return " ".join(words[:max_words])
+    # 2) иначе любые английские слова из всей строки
+    words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", title)
+    if words:
+        return " ".join(words[:max_words])
+    # 3) фолбэк — первое слово исходного названия
+    return (title.strip().split() or [""])[0]
+
+import inspect
+import pydyf
+
+if len(inspect.signature(pydyf.PDF.__init__).parameters) == 1:  # только (self)
+    _orig_init = pydyf.PDF.__init__
+
+    def _patched_init(self, version='1.7', identifier=None, *args, **kwargs):
+        # старый pydyf не ждет аргументы -> просто вызываем оригинал
+        _orig_init(self)
+        # WeasyPrint ожидает, что у PDF есть .version (bytes) и .identifier
+        try:
+            self.version = (
+                version if isinstance(version, (bytes, bytearray))
+                else str(version).encode('ascii')
+            )
+        except Exception:
+            self.version = b'1.7'
+        self.identifier = identifier
+
+    pydyf.PDF.__init__ = _patched_init
+# --- END TEMP PATCH ---
+
+from urllib.parse import quote_plus
+from PIL import Image
+from pathlib import Path
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
-
+from weasyprint import HTML
+from io import BytesIO
+import io
+import base64, os
+import qrcode
 import datetime as dt
 from django.utils import timezone
 from django.db import transaction
@@ -17,7 +65,9 @@ from django.core.exceptions import FieldError   # ← ДОБАВИТЬ
 from django.conf import settings
 from django.contrib.auth import get_user_model, authenticate, login as auth_login
 from django.shortcuts import render, get_object_or_404
-from django.http import JsonResponse
+from django.template.loader import render_to_string
+from django.templatetags.static import static
+from django.http import JsonResponse, HttpResponse
 from django.views.decorators.http import require_GET, require_POST
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie, csrf_protect
 from django.middleware.csrf import get_token
@@ -46,7 +96,6 @@ from .serializers import (
     BookingSaleDetailSerializer,      # для CBV
 )
 
-import re, html
 import requests
 import logging
 import inspect
@@ -55,6 +104,121 @@ import json
 WEEKDAYS = ["mon","tue","wed","thu","fri","sat","sun"]
 
 FamilyBooking = apps.get_model('sales', 'FamilyBooking')
+
+logo_path = os.path.join(settings.BASE_DIR, "sales", "static", "sales", "logo.png")
+logo_b64 = ""
+if os.path.exists(logo_path):
+    with open(logo_path, "rb") as f:
+        logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def booking_ticket_pdf(request, pk: int):
+    from .models import BookingSale, Traveler
+
+    # --- утилита для английского короткого названия ---
+    def pick_title_en(title: str, max_words: int = 3) -> str:
+        if not title:
+            return ""
+        # сначала пытаемся вытащить англ. сегмент после разделителей
+        parts = re.split(r"\s*[\/\|\-–—]\s*", title)
+        for part in parts:
+            words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", part)
+            if words:
+                return " ".join(words[:max_words])
+        # затем любые англ. слова из всей строки
+        words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", title)
+        if words:
+            return " ".join(words[:max_words])
+        # фолбэк — первое слово целиком
+        return (title.strip().split() or [""])[0]
+
+    b = get_object_or_404(BookingSale, pk=pk)
+
+    # 1) Дата EN
+    d = getattr(b, "date", None) or localdate()
+    try:
+        date_en = d.strftime("%-d %B %Y")   # macOS/Linux
+    except Exception:
+        date_en = d.strftime("%d %B %Y")    # Windows fallback
+
+    # 2) Гости
+    travelers = []
+    if getattr(b, "travelers_names", None):
+        travelers = [x.strip() for x in b.travelers_names.splitlines() if x.strip()]
+    if not travelers:
+        ids_raw = (getattr(b, "travelers_csv", "") or "").strip()
+        if ids_raw:
+            try:
+                ids = [int(x) for x in ids_raw.replace(";", ",").split(",") if x.strip().isdigit()]
+                qs = Traveler.objects.filter(id__in=ids).order_by("id")
+                travelers = [f"{t.first_name} {t.last_name}".strip() for t in qs]
+            except Exception:
+                travelers = []
+
+    # 3) Два QR
+    # 3a) сайт
+    qr_site_url = f"https://www.costasolinfo.com/?ref={b.booking_code}"
+    # 3b) карта точки (координаты приоритетны)
+    lat = getattr(b, "pickup_lat", None)
+    lng = getattr(b, "pickup_lng", None)
+    if lat and lng:
+        maps_query = f"{lat},{lng}"
+    else:
+        parts = [getattr(b, "pickup_point_name", ""), getattr(b, "hotel_name", ""), "Costa del Sol"]
+        maps_query = " ".join(p for p in parts if p)
+    qr_maps_url = f"https://www.google.com/maps/search/?api=1&query={quote_plus(maps_query)}"
+
+    def make_qr_data_uri(url: str, size=(100, 100)) -> str:
+        img = qrcode.make(url)              # PIL.Image
+        if size:
+            img = img.resize(size, Image.NEAREST)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    qr_site = make_qr_data_uri(qr_site_url)
+    qr_maps = make_qr_data_uri(qr_maps_url)
+
+    # 4) Логотип через static (WeasyPrint подтянет благодаря base_url)
+    logo_url = request.build_absolute_uri(static("sales/logo.png"))
+
+    # 5) Английское короткое название (ВАЖНО: посчитать ДО ctx)
+    title_en = pick_title_en(getattr(b, "excursion_title", ""), max_words=3)
+
+    # 6) Рендер
+    ctx = {
+        "b": b,
+        "date_en": date_en,
+        "travelers": travelers,
+        "logo_url": logo_url,
+        "qr_site": qr_site,
+        "qr_maps": qr_maps,
+        "qr_site_url": qr_site_url,
+        "qr_maps_url": qr_maps_url,
+        "title_en": title_en,
+    }
+    html = render_to_string("sales/ticket.html", ctx)
+    pdf = HTML(string=html, base_url=request.build_absolute_uri("/")).write_pdf()
+
+    resp = HttpResponse(pdf, content_type="application/pdf")
+    resp["Content-Disposition"] = f'inline; filename="ticket_{b.booking_code}.pdf"'
+    return resp
+
+def encode_logo_b64(max_w=400, max_h=120):
+    path = Path(settings.BASE_DIR) / "sales" / "static" / "sales" / "logo.png"
+    if not path.exists():
+        return ""
+    with Image.open(path) as im:
+        im = im.convert("RGBA")
+        im.thumbnail((max_w, max_h))  # мягкое масштабирование, сохранит пропорции
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+logo_b64 = encode_logo_b64()
 
 @ensure_csrf_cookie
 def csrf_view(request):

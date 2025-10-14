@@ -191,6 +191,7 @@ class BookingSale(models.Model):
 
     # состав группы (CSV-idшники под SQLite)
     travelers_csv = models.TextField(blank=True)  # "12,15,33"
+    travelers_names = models.TextField(blank=True, null=True, help_text="Снапшот ФИО через \\n")
 
     # статус
     status = models.CharField(max_length=10, choices=STATUS, default="DRAFT", db_index=True)
@@ -231,6 +232,24 @@ class BookingSale(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
 
+    def set_travelers_names_from_ids(self):
+        ids_raw = (self.travelers_csv or "").strip()
+        if not ids_raw:
+            self.travelers_names = None
+            return
+        from .models import Traveler
+        ids = [int(x) for x in ids_raw.replace(";", ",").split(",") if x.strip().isdigit()]
+        names = []
+        for t in Traveler.objects.filter(id__in=ids).order_by("id"):
+            names.append(f"{t.first_name} {t.last_name}".strip())
+        self.travelers_names = "\n".join(filter(None, names))
+
+    @property
+    def travelers_names_list(self):
+        if not self.travelers_names:
+            return []
+        return [x.strip() for x in self.travelers_names.splitlines() if x.strip()]
+    
     # ---------- УТИЛИТЫ -------------------------------------------------------
     def maps_url(self):
         if self.pickup_lat and self.pickup_lng:

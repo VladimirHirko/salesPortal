@@ -4,11 +4,14 @@ Django settings for sales_portal project.
 
 import os
 from pathlib import Path
-from dotenv import load_dotenv
-load_dotenv()
-
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# безопасная загрузка .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env")
+except Exception:
+    pass
 
 CSI_API_MODE = os.getenv("CSI_API_MODE", "prod")
 CSI_API_BASE = os.getenv("CSI_API_BASE_PROD") if CSI_API_MODE == "prod" else os.getenv("CSI_API_BASE_LOCAL")
@@ -105,7 +108,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     "rest_framework",
     "corsheaders",
-    "sales",
+    'sales.apps.SalesConfig',   # <- не просто 'sales'
 ]
 
 MIDDLEWARE = [

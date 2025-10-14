@@ -145,6 +145,7 @@ class BookingSaleAdmin(admin.ModelAdmin):
         "hotel_name", "pickup_point_name", "pickup_time_str",
         "excursion_language", "room_number",
         "adults", "children", "gross_total", "status_badge",
+        "travelers_csv", "travelers_names_readonly",
     )
     list_filter = (HideCancelledFilter, "company", "status", "excursion_language", "date")
     search_fields = (
@@ -153,6 +154,12 @@ class BookingSaleAdmin(admin.ModelAdmin):
     )
     readonly_fields = ("created_at",)
     actions = ["export_bookings_xlsx", backfill_region_name]
+
+    def travelers_names_readonly(self, obj):
+        if not obj or not obj.travelers_names:
+            return "-"
+        return format_html("<br>".join(obj.travelers_names.splitlines()))
+    travelers_names_readonly.short_description = "Travelers"
 
     # цветной статус
     def status_badge(self, obj):

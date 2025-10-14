@@ -61,6 +61,7 @@ urlpatterns = [
     path("bookings/family/<int:fam_id>/drafts/", v.FamilyBookingDraftsView.as_view(), name="family-drafts"),
     path("bookings/batch/preview/", v.BookingBatchPreviewView.as_view(), name="bookings-batch-preview"),
     path("bookings/batch/send/", v.BookingBatchSendView.as_view(), name="bookings-batch-send"),
+    path("bookings/<int:pk>/ticket.pdf", v.booking_ticket_pdf, name="booking-ticket-pdf"),
 
     # Бронирования — работа с отдельной бронью
     path("bookings/<int:pk>/", v.BookingDetailView.as_view(), name="booking-detail"),

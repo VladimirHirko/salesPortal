@@ -1,0 +1,7 @@
+weasyprint==61.2
+pydyf==0.11.0
+tinycss2==1.2.1
+cssselect2==0.7.0
+pillow>=10.0
+qrcode==7.4.2
+
